@@ -23,11 +23,16 @@ enum { IDC_COMBO_MODEL=101, IDC_EDIT_IP, IDC_EDIT_PORT,
        IDC_EDIT_TEMP, IDC_EDIT_MAXTOK, IDC_BTN_START, IDC_BTN_STOP,
        IDC_EDIT_LOG, IDC_STATIC_STATUS, IDC_BTN_REDETECT };
 #define IDI_ICON1 101
+#define WM_TRAYICON (WM_APP + 1)
+#define ID_TRAY_SHOW 201
+#define ID_TRAY_EXIT 202
 
 // ---------------- 全局 ----------------
+static NOTIFYICONDATAW g_nid = {};
 static HWND g_hwnd, g_hComboModel, g_hEditIP, g_hEditPort, g_hComboBackend,
             g_hComboCtx, g_hComboThink, g_hChkFA, g_hChkKV, g_hChkAutoBrowser,
             g_hEditTemp, g_hEditMaxTok, g_hBtnStart, g_hBtnStop, g_hBtnRedetect, g_hLog, g_hStatus, g_hStatus2;
+static std::wstring g_webUrl = L"http://localhost:8080";
 static PROCESS_INFORMATION g_pi = {};
 static HANDLE g_hReadPipe = INVALID_HANDLE_VALUE;
 static std::wstring g_exeDir;
@@ -268,6 +273,14 @@ static void startServer() {
     logLine(L"[启动器] 启动命令:");
     logLine(args);
     CreateThread(nullptr, 0, (LPTHREAD_START_ROUTINE)readPipeThread, nullptr, 0, nullptr);
+    // 更新 WebUI 地址(0.0.0.0 → localhost),启动日志末尾会以链接形式输出
+    {
+        std::wstring ipv = trim(ip).empty() ? L"localhost" : trim(ip);
+        if (ipv == L"0.0.0.0") ipv = L"localhost";
+        g_webUrl = L"http://" + ipv + L":" + std::wstring(port);
+    }
+    // 启动日志刷完(8 秒)后在末尾追加提示
+    SetTimer(g_hwnd, 1, 8000, nullptr);
     if (SendMessageW(g_hChkAutoBrowser, BM_GETCHECK, 0, 0) == BST_CHECKED) {
         std::wstring url = L"http://" + std::wstring(trim(ip).empty()?L"127.0.0.1":trim(ip)) + L":" + port;
         ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
@@ -409,6 +422,31 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         scanModels();
         loadConfig();
         applyDetected();
+        // 创建系统托盘图标
+        g_nid.cbSize = sizeof(g_nid);
+        g_nid.hWnd = hwnd;
+        g_nid.uID = 1;
+        g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+        g_nid.uCallbackMessage = WM_TRAYICON;
+        g_nid.hIcon = LoadIconW(GetModuleHandleW(nullptr), (LPCWSTR)(ULONG_PTR)IDI_ICON1);
+        wcscpy(g_nid.szTip, L"Llama Launcher");
+        Shell_NotifyIconW(NIM_ADD, &g_nid);
+        return 0;
+    }
+    case WM_TRAYICON: {
+        if (lp == WM_LBUTTONUP) {          // 单击:恢复窗口
+            ShowWindow(hwnd, SW_SHOW);
+            SetForegroundWindow(hwnd);
+        } else if (lp == WM_RBUTTONUP) {   // 右键:弹出菜单
+            HMENU menu = CreatePopupMenu();
+            AppendMenuW(menu, MF_STRING, ID_TRAY_SHOW, L"显示主窗口");
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(menu, MF_STRING, ID_TRAY_EXIT, L"退出");
+            POINT pt; GetCursorPos(&pt);
+            SetForegroundWindow(hwnd);
+            TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_LEFTALIGN, pt.x, pt.y, 0, hwnd, nullptr);
+            DestroyMenu(menu);
+        }
         return 0;
     }
     case WM_CTLCOLOREDIT:
@@ -422,13 +460,29 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         break;
     }
+
     case WM_COMMAND: {
         int id = LOWORD(wp);
         if (id == IDC_BTN_START) { saveConfig(); startServer(); }
         else if (id == IDC_BTN_STOP) stopServer();
         else if (id == IDC_BTN_REDETECT) applyDetected();
+        else if (id == ID_TRAY_SHOW) {
+            ShowWindow(hwnd, SW_SHOW);
+            SetForegroundWindow(hwnd);
+        } else if (id == ID_TRAY_EXIT) {
+            saveConfig();
+            stopServer();
+            Shell_NotifyIconW(NIM_DELETE, &g_nid);
+            DestroyWindow(hwnd);
+        }
         break;
     }
+    case WM_TIMER:
+        if (wp == 1) {          // 启动日志刷完后的 WebUI 提示
+            KillTimer(hwnd, 1);
+            logLine(L"[启动器] WebUI: " + g_webUrl);
+        }
+        return 0;
     case WM_USER+1: {
         wchar_t* line = (wchar_t*)lp;
         if (line) { logLine(line); free(line); }
@@ -442,12 +496,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_CLOSE:
-        saveConfig();
-        stopServer();
-        DestroyWindow(hwnd);
+        // 点 X:隐藏到系统托盘(服务继续运行),不退出
+        ShowWindow(hwnd, SW_HIDE);
         return 0;
     case WM_DESTROY:
         if (g_hLogBrush) DeleteObject(g_hLogBrush);
+        Shell_NotifyIconW(NIM_DELETE, &g_nid);
         PostQuitMessage(0);
         return 0;
     }
