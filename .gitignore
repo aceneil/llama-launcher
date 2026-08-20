@@ -1,4 +1,5 @@
 # 构建产物(发布时手动放进 Release)
 dist/
+src/resources.o
 # 本地运行残留
 launcher.ini
