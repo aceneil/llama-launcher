@@ -20,6 +20,7 @@
 enum { IDC_COMBO_MODEL=101, IDC_EDIT_IP, IDC_EDIT_PORT,
        IDC_COMBO_BACKEND, IDC_COMBO_CTX, IDC_COMBO_THINK,
        IDC_CHK_FA, IDC_CHK_KV, IDC_CHK_AUTOBROWSER,
+       IDC_CHK_PRELOAD,
        IDC_EDIT_TEMP, IDC_EDIT_MAXTOK, IDC_BTN_START, IDC_BTN_STOP,
        IDC_EDIT_LOG, IDC_STATIC_STATUS, IDC_BTN_REDETECT };
 #define IDI_ICON1 101
@@ -31,12 +32,13 @@ enum { IDC_COMBO_MODEL=101, IDC_EDIT_IP, IDC_EDIT_PORT,
 static NOTIFYICONDATAW g_nid = {};
 static HWND g_hwnd, g_hComboModel, g_hEditIP, g_hEditPort, g_hComboBackend,
             g_hComboCtx, g_hComboThink, g_hChkFA, g_hChkKV, g_hChkAutoBrowser,
+            g_hChkPreload,
             g_hEditTemp, g_hEditMaxTok, g_hBtnStart, g_hBtnStop, g_hBtnRedetect, g_hLog, g_hStatus, g_hStatus2;
 static std::wstring g_webUrl = L"http://localhost:8080";
 static PROCESS_INFORMATION g_pi = {};
 static HANDLE g_hReadPipe = INVALID_HANDLE_VALUE;
 static std::wstring g_exeDir;
-static std::vector<std::wstring> g_models;
+static std::vector<std::pair<std::wstring,std::wstring>> g_models;  // (显示名, 模型ID)
 static HBRUSH g_hLogBrush = nullptr;
 
 static std::wstring ws(const std::string& s) {
@@ -116,7 +118,9 @@ static void computeBestConfig(const HwInfo& h, std::wstring& ctx, std::wstring& 
 }
 
 // ---------------- 模型扫描(递归) ----------------
-static void scanDirRecursive(const std::wstring& dir) {
+// 记录 (显示名, 模型ID)。llama.cpp router 的 --models-dir 命名规则:
+//   子目录模型 → 子目录名;根目录散文件 → 文件名去掉 .gguf
+static void scanDirRecursive(const std::wstring& dir, const std::wstring& relDir, std::vector<std::pair<std::wstring,std::wstring>>& out) {
     std::wstring pattern = dir + L"\\*";
     WIN32_FIND_DATAW fd;
     HANDLE hf = FindFirstFileW(pattern.c_str(), &fd);
@@ -125,13 +129,20 @@ static void scanDirRecursive(const std::wstring& dir) {
         std::wstring name = fd.cFileName;
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             if (name == L"." || name == L"..") continue;
-            scanDirRecursive(dir + L"\\" + name);
+            scanDirRecursive(dir + L"\\" + name, relDir.empty() ? name : relDir + L"\\" + name, out);
         } else {
             std::wstring low = name;
             for (auto& c : low) c = towlower(c);
             // 跳过 mmproj 多模态投影文件(不能单独当主模型)
             if (low.size() > 5 && low.substr(low.size()-5) == L".gguf" &&
-                low.find(L"mmproj") == std::wstring::npos) g_models.push_back(name);
+                low.find(L"mmproj") == std::wstring::npos) {
+                // 模型 ID:子目录模型取第一级子目录名,根目录散文件取文件名去 .gguf
+                std::wstring id;
+                size_t slash = relDir.find(L'\\');
+                if (!relDir.empty()) id = (slash == std::wstring::npos) ? relDir : relDir.substr(0, slash);
+                else id = name.substr(0, name.size()-5);
+                out.emplace_back(name, id);
+            }
         }
     } while (FindNextFileW(hf, &fd));
     FindClose(hf);
@@ -139,11 +150,11 @@ static void scanDirRecursive(const std::wstring& dir) {
 
 static void scanModels() {
     g_models.clear();
-    scanDirRecursive(g_exeDir + L"\\models");
+    scanDirRecursive(g_exeDir + L"\\models", L"", g_models);
     SendMessageW(g_hComboModel, CB_RESETCONTENT, 0, 0);
     if (g_models.empty())
         SendMessageW(g_hComboModel, CB_ADDSTRING, 0, (LPARAM)L"(models 目录无 GGUF)");
-    for (auto& m : g_models) SendMessageW(g_hComboModel, CB_ADDSTRING, 0, (LPARAM)m.c_str());
+    for (auto& m : g_models) SendMessageW(g_hComboModel, CB_ADDSTRING, 0, (LPARAM)m.first.c_str());
     SendMessageW(g_hComboModel, CB_SETCURSEL, 0, 0);
 }
 
@@ -236,6 +247,22 @@ static void startServer() {
     args += L" --host " + std::wstring(trim(ip).empty()?L"127.0.0.1":trim(ip));
     args += L" --port " + std::wstring(port);
     args += L" -c " + ctxStr;
+
+    // ★ 启动时自动加载所选模型(router 模式的 load-on-startup)
+    //    写入 exe 同目录 presets.ini 的 [模型ID] 段,并传 --models-preset;
+    //    只更新本模型段,不破坏文件里其他已有配置。
+    if (SendMessageW(g_hChkPreload, BM_GETCHECK, 0, 0) == BST_CHECKED &&
+        hasFlag(L"--models-preset")) {
+        int sel = SendMessageW(g_hComboModel, CB_GETCURSEL, 0, 0);
+        if (sel >= 0 && sel < (int)g_models.size()) {
+            std::wstring presetPath = g_exeDir + L"\\presets.ini";
+            WritePrivateProfileStringW(g_models[sel].second.c_str(), L"load-on-startup", L"true", presetPath.c_str());
+            args += L" --models-preset \"" + presetPath + L"\"";
+            logLine(L"[启动器] 已设 " + g_models[sel].second + L" 启动自动加载 (presets.ini)");
+        } else {
+            logLine(L"[启动器] 未选模型,跳过自动加载设置");
+        }
+    }
     if (hasFlag(L"--jinja")) args += L" --jinja";
     if (fa && hasFlag(L"--flash-attn")) args += L" -fa on";
     if (kv && hasFlag(L"--cache-type-k")) args += L" --cache-type-k q8_0 --cache-type-v q8_0";
@@ -306,6 +333,7 @@ static void saveConfig() {
     WritePrivateProfileStringW(L"launcher", L"fa", SendMessageW(g_hChkFA,BM_GETCHECK,0,0)==BST_CHECKED?L"1":L"0", iniPath().c_str());
     WritePrivateProfileStringW(L"launcher", L"kv", SendMessageW(g_hChkKV,BM_GETCHECK,0,0)==BST_CHECKED?L"1":L"0", iniPath().c_str());
     WritePrivateProfileStringW(L"launcher", L"autobrowser", SendMessageW(g_hChkAutoBrowser,BM_GETCHECK,0,0)==BST_CHECKED?L"1":L"0", iniPath().c_str());
+    WritePrivateProfileStringW(L"launcher", L"preload", SendMessageW(g_hChkPreload,BM_GETCHECK,0,0)==BST_CHECKED?L"1":L"0", iniPath().c_str());
     WritePrivateProfileStringW(L"launcher", L"temp", temp, iniPath().c_str());
     WritePrivateProfileStringW(L"launcher", L"maxtok", mtok, iniPath().c_str());
 }
@@ -327,6 +355,7 @@ static void loadConfig() {
     SendMessageW(g_hChkFA, BM_SETCHECK, GetPrivateProfileIntW(L"launcher", L"fa", 1, iniPath().c_str()) ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(g_hChkKV, BM_SETCHECK, GetPrivateProfileIntW(L"launcher", L"kv", 1, iniPath().c_str()) ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(g_hChkAutoBrowser, BM_SETCHECK, GetPrivateProfileIntW(L"launcher", L"autobrowser", 0, iniPath().c_str()) ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(g_hChkPreload, BM_SETCHECK, GetPrivateProfileIntW(L"launcher", L"preload", 1, iniPath().c_str()) ? BST_CHECKED : BST_UNCHECKED, 0);
 }
 
 // ---------------- 窗口 ----------------
@@ -396,7 +425,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // 开关
         g_hChkFA = CreateWindowW(L"BUTTON", L"Flash Attention", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX, y, 118, LH, hwnd, (HMENU)IDC_CHK_FA, nullptr, nullptr);
         g_hChkKV = CreateWindowW(L"BUTTON", L"KV 量化", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX+126, y, 76, LH, hwnd, (HMENU)IDC_CHK_KV, nullptr, nullptr);
-        g_hChkAutoBrowser = CreateWindowW(L"BUTTON", L"自动打开浏览器", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX+212, y, 140, LH, hwnd, (HMENU)IDC_CHK_AUTOBROWSER, nullptr, nullptr);
+        g_hChkAutoBrowser = CreateWindowW(L"BUTTON", L"自动开浏览器", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX+210, y, 100, LH, hwnd, (HMENU)IDC_CHK_AUTOBROWSER, nullptr, nullptr);
         y += 28;
         // 温度 / 生成上限(同行)
         addLabel(hwnd, L"温度:", LX, y+2, LW0, LH);
@@ -404,6 +433,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         addLabel(hwnd, L"生成上限:", IX+70, y+2, 64, LH);
         g_hEditMaxTok = CreateWindowW(L"EDIT", L"8192", WS_CHILD|WS_VISIBLE|WS_BORDER, IX+134, y, 60, LH+4, hwnd, (HMENU)IDC_EDIT_MAXTOK, nullptr, nullptr);
         y += 34;
+        // 启动时自动加载所选模型(router 模式 load-on-startup)
+        g_hChkPreload = CreateWindowW(L"BUTTON", L"启动自动加载所选模型(写 presets.ini)", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX, y, 280, LH, hwnd, (HMENU)IDC_CHK_PRELOAD, nullptr, nullptr);
+        y += 28;
         // 按钮(相对左侧表单居中,与上行保持间距)
         y += 42;
         const int BTN_W = 90, BTN_GAP = 10;

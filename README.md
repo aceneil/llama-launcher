@@ -12,6 +12,7 @@
 - 📜 **cmd 风格日志**:右侧黑底实时输出 llama-server 日志
 - 💾 **配置记忆**:上次选择自动保存(`launcher.ini`)
 - 🔄 **router 模式**:多模型热切换(基于 llama.cpp `--models-dir`)
+- ⚡ **启动自动加载**:勾选后自动写 `presets.ini` 的 `load-on-startup` 并传 `--models-preset`,网页打开即有模型(子目录模型取子目录名、根目录散文件取文件名去 `.gguf` 作为模型 ID)
 - 🎨 **自定义图标**:内置 8-bit 像素风图标(奔跑的马)
 
 ## 使用
