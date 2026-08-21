@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <shellapi.h>
+#include <wininet.h>
 #include <string>
 #include <vector>
 #include <sstream>
@@ -15,6 +16,7 @@
 #include <cstdio>
 
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "wininet.lib")
 
 // ---------------- 控件 ID ----------------
 enum { IDC_COMBO_MODEL=101, IDC_EDIT_IP, IDC_EDIT_PORT,
@@ -22,7 +24,7 @@ enum { IDC_COMBO_MODEL=101, IDC_EDIT_IP, IDC_EDIT_PORT,
        IDC_CHK_FA, IDC_CHK_KV, IDC_CHK_AUTOBROWSER,
        IDC_CHK_PRELOAD, IDC_CHK_DEBUG,
        IDC_EDIT_TEMP, IDC_EDIT_MAXTOK, IDC_BTN_START, IDC_BTN_STOP,
-       IDC_EDIT_LOG, IDC_STATIC_STATUS, IDC_BTN_REDETECT };
+       IDC_EDIT_LOG, IDC_STATIC_STATUS, IDC_BTN_REDETECT, IDC_STATIC_HEARTBEAT };
 #define IDI_ICON1 101
 #define WM_TRAYICON (WM_APP + 1)
 #define ID_TRAY_SHOW 201
@@ -33,13 +35,15 @@ static NOTIFYICONDATAW g_nid = {};
 static HWND g_hwnd, g_hComboModel, g_hEditIP, g_hEditPort, g_hComboBackend,
             g_hComboCtx, g_hComboThink, g_hChkFA, g_hChkKV, g_hChkAutoBrowser,
             g_hChkPreload, g_hChkDebug,
-            g_hEditTemp, g_hEditMaxTok, g_hBtnStart, g_hBtnStop, g_hBtnRedetect, g_hLog, g_hStatus, g_hStatus2;
+            g_hEditTemp, g_hEditMaxTok, g_hBtnStart, g_hBtnStop, g_hBtnRedetect, g_hStatus, g_hStatus2, g_hHeartbeat;
 static std::wstring g_webUrl = L"http://localhost:8080";
 static PROCESS_INFORMATION g_pi = {};
-static HANDLE g_hReadPipe = INVALID_HANDLE_VALUE;
 static std::wstring g_exeDir;
 static std::vector<std::pair<std::wstring,std::wstring>> g_models;  // (显示名, 模型ID)
-static HBRUSH g_hLogBrush = nullptr;
+static HANDLE g_hBeatThread = nullptr;
+static volatile bool g_beatRunning = false;
+static std::wstring g_beatPort = L"8080";
+static std::wstring g_beatStatus = L"○ 服务未运行";   // 心跳线程 → UI 的当前状态文本
 
 static std::wstring ws(const std::string& s) {
     std::wstring r; r.reserve(s.size());
@@ -50,12 +54,54 @@ static std::wstring trim(const std::wstring& s) {
     size_t a = s.find_first_not_of(L" \t\r\n"), b = s.find_last_not_of(L" \t\r\n");
     return (a == std::wstring::npos) ? L"" : s.substr(a, b - a + 1);
 }
-static void logLine(const std::wstring& line) {
-    int len = GetWindowTextLengthW(g_hLog);
-    SendMessageW(g_hLog, EM_SETSEL, len, len);
-    SendMessageW(g_hLog, EM_REPLACESEL, 0, (LPARAM)line.c_str());
-    SendMessageW(g_hLog, EM_REPLACESEL, 0, (LPARAM)L"\r\n");
-    SendMessageW(g_hLog, EM_SCROLLCARET, 0, 0);
+
+// ---------------- 心跳检测 ----------------
+// 轮询 /health:返回 {"status":"ok"} 即服务正常(模型已加载/或 router 就绪)。
+// 独立线程避免阻塞 UI;结果通过 WM_USER+3 回传。
+static DWORD WINAPI heartbeatThread(LPVOID) {
+    while (g_beatRunning) {
+        std::wstring port = g_beatPort;
+        std::wstring url = L"http://127.0.0.1:" + port + L"/health";
+        std::string body;
+        HINTERNET hNet = InternetOpenW(L"LlamaLauncher", INTERNET_OPEN_TYPE_PRECONFIG, nullptr, nullptr, 0);
+        if (hNet) {
+            HINTERNET hReq = InternetOpenUrlW(hNet, url.c_str(), nullptr, 0, INTERNET_FLAG_RELOAD | INTERNET_FLAG_NO_CACHE_WRITE, 0);
+            if (hReq) {
+                char buf[512]; DWORD rd;
+                while (InternetReadFile(hReq, buf, sizeof(buf)-1, &rd) && rd) { buf[rd]=0; body += buf; }
+                InternetCloseHandle(hReq);
+            }
+            InternetCloseHandle(hNet);
+        }
+        std::wstring st;
+        if (body.find("\"ok\"") != std::string::npos || body.find("\"status\":\"ok\"") != std::string::npos)
+            st = L"● 服务正常 · 模型已就绪";
+        else if (!body.empty())
+            st = L"○ 服务响应异常(" + ws(body.substr(0, 40)) + L")";
+        else
+            st = L"○ 服务未运行";
+        g_beatStatus = st;
+        PostMessageW(g_hwnd, WM_USER+3, 0, 0);
+        for (int i = 0; i < 20 && g_beatRunning; i++) Sleep(500);  // 10 秒一轮
+    }
+    return 0;
+}
+
+static void startHeartbeat(const std::wstring& port) {
+    g_beatPort = port;
+    if (g_hBeatThread) return;
+    g_beatRunning = true;
+    g_hBeatThread = CreateThread(nullptr, 0, heartbeatThread, nullptr, 0, nullptr);
+}
+
+static void stopHeartbeat() {
+    g_beatRunning = false;
+    if (g_hBeatThread) {
+        WaitForSingleObject(g_hBeatThread, 2000);
+        CloseHandle(g_hBeatThread);
+        g_hBeatThread = nullptr;
+    }
+    if (g_hHeartbeat) SetWindowTextW(g_hHeartbeat, L"○ 服务未运行");
 }
 
 // ---------------- 硬件检测 ----------------
@@ -198,18 +244,9 @@ static std::wstring findServer() {
     return found[0];
 }
 
-static void readPipeThread(LPVOID) {
-    char buf[4096]; DWORD n;
-    std::string acc;
-    while (ReadFile(g_hReadPipe, buf, sizeof(buf)-1, &n, nullptr) && n) {
-        buf[n] = 0; acc += buf;
-        size_t pos;
-        while ((pos = acc.find('\n')) != std::string::npos) {
-            std::string line = acc.substr(0, pos); acc.erase(0, pos+1);
-            while (!line.empty() && (line.back()=='\r'||line.back()=='\n')) line.pop_back();
-            PostMessageW(g_hwnd, WM_USER+1, 0, (LPARAM)_wcsdup(ws(line).c_str()));
-        }
-    }
+// 等待进程退出线程(替代原日志管道):进程结束后恢复按钮状态
+static void waitExitThread(LPVOID) {
+    WaitForSingleObject(g_pi.hProcess, INFINITE);
     PostMessageW(g_hwnd, WM_USER+2, 0, 0);
     return;
 }
@@ -220,16 +257,21 @@ static void stopServer() {
         CloseHandle(g_pi.hProcess); CloseHandle(g_pi.hThread);
         g_pi = {};
     }
-    if (g_hReadPipe != INVALID_HANDLE_VALUE) { CloseHandle(g_hReadPipe); g_hReadPipe = INVALID_HANDLE_VALUE; }
     EnableWindow(g_hBtnStart, TRUE); EnableWindow(g_hBtnStop, FALSE);
-    logLine(L"[启动器] 服务已停止");
+    stopHeartbeat();
 }
 
 static void startServer() {
-    if (g_pi.hProcess) { logLine(L"[启动器] 已在运行"); return; }
+    if (g_pi.hProcess) return;
     std::wstring server = findServer();
-    if (server.empty()) { logLine(L"[启动器] 未找到 llama-server.exe(请放在本程序同目录或子目录)"); return; }
-    if (g_models.empty()) { logLine(L"[启动器] models 目录没有模型"); return; }
+    if (server.empty()) {
+        MessageBoxW(g_hwnd, L"未找到 llama-server.exe,请放在本程序同目录或子目录。", L"Llama Launcher", MB_ICONWARNING);
+        return;
+    }
+    if (g_models.empty()) {
+        MessageBoxW(g_hwnd, L"models 目录没有模型。", L"Llama Launcher", MB_ICONWARNING);
+        return;
+    }
 
     wchar_t ip[64], port[16], temp[16], mtok[16];
     GetWindowTextW(g_hEditIP, ip, 64); GetWindowTextW(g_hEditPort, port, 16);
@@ -275,9 +317,6 @@ static void startServer() {
             std::wstring presetPath = g_exeDir + L"\\presets.ini";
             WritePrivateProfileStringW(g_models[sel].second.c_str(), L"load-on-startup", L"true", presetPath.c_str());
             args += L" --models-preset \"" + presetPath + L"\"";
-            logLine(L"[启动器] 已设 " + g_models[sel].second + L" 启动自动加载 (presets.ini)");
-        } else {
-            logLine(L"[启动器] 未选模型,跳过自动加载设置");
         }
     }
     if (hasFlag(L"--jinja")) args += L" --jinja";
@@ -300,50 +339,33 @@ static void startServer() {
     else if (g_help.find(L"cuda") != std::wstring::npos) args += L" -ngl 99";
 
     bool debug = SendMessageW(g_hChkDebug, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    SECURITY_ATTRIBUTES sa = {sizeof(sa), nullptr, TRUE};
     std::vector<wchar_t> cmdline(args.begin(), args.end()); cmdline.push_back(0);
+    STARTUPINFOW si = {sizeof(si)};
+    si.dwFlags = STARTF_USESHOWWINDOW;
     if (debug) {
         // 调试模式:独立控制台窗口直接运行,日志留在窗口里可滚动观察,
-        // 关闭窗口即停止服务。不接管管道,启动器日志框只显示摘要。
-        STARTUPINFOW sid = {sizeof(sid)};
-        sid.dwFlags = STARTF_USESHOWWINDOW;
-        sid.wShowWindow = SW_SHOWNORMAL;
+        // 关闭窗口即停止服务。
+        si.wShowWindow = SW_SHOWNORMAL;
         BOOL ok = CreateProcessW(nullptr, cmdline.data(), nullptr, nullptr, TRUE,
-                                 CREATE_NEW_CONSOLE, nullptr, g_exeDir.c_str(), &sid, &g_pi);
+                                 CREATE_NEW_CONSOLE, nullptr, g_exeDir.c_str(), &si, &g_pi);
         if (!ok) {
-            logLine(L"[启动器] 启动失败: " + std::to_wstring(GetLastError()));
+            MessageBoxW(g_hwnd, (L"llama-server 启动失败: " + std::to_wstring(GetLastError())).c_str(), L"Llama Launcher", MB_ICONERROR);
             return;
         }
-        EnableWindow(g_hBtnStart, FALSE); EnableWindow(g_hBtnStop, TRUE);
-        logLine(L"[启动器] 调试模式:llama-server 运行在独立窗口(关闭窗口即停止)");
-        logLine(L"[启动器] 启动命令:");
-        logLine(args);
     } else {
-        HANDLE r, w; if (!CreatePipe(&r, &w, &sa, 0)) return;
-        SetHandleInformation(r, HANDLE_FLAG_INHERIT, 0);
-        STARTUPINFOW si = {sizeof(si)};
-        si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
-        si.hStdOutput = si.hStdError = w; si.wShowWindow = SW_HIDE;
-        BOOL ok = CreateProcessW(nullptr, cmdline.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, g_exeDir.c_str(), &si, &g_pi);
-        CloseHandle(w);
+        // 普通模式:后台静默运行(无日志框),通过心跳观察状态
+        si.wShowWindow = SW_HIDE;
+        BOOL ok = CreateProcessW(nullptr, cmdline.data(), nullptr, nullptr, TRUE,
+                                 CREATE_NO_WINDOW, nullptr, g_exeDir.c_str(), &si, &g_pi);
         if (!ok) {
-            logLine(L"[启动器] 启动失败: " + std::to_wstring(GetLastError()));
-            CloseHandle(r); return;
+            MessageBoxW(g_hwnd, (L"llama-server 启动失败: " + std::to_wstring(GetLastError())).c_str(), L"Llama Launcher", MB_ICONERROR);
+            return;
         }
-        g_hReadPipe = r;
-        EnableWindow(g_hBtnStart, FALSE); EnableWindow(g_hBtnStop, TRUE);
-        logLine(L"[启动器] 启动命令:");
-        logLine(args);
-        CreateThread(nullptr, 0, (LPTHREAD_START_ROUTINE)readPipeThread, nullptr, 0, nullptr);
     }
-    // 更新 WebUI 地址(0.0.0.0 → localhost),启动日志末尾会以链接形式输出
-    {
-        std::wstring ipv = trim(ip).empty() ? L"localhost" : trim(ip);
-        if (ipv == L"0.0.0.0") ipv = L"localhost";
-        g_webUrl = L"http://" + ipv + L":" + std::wstring(port);
-    }
-    // 启动日志刷完(8 秒)后在末尾追加提示
-    SetTimer(g_hwnd, 1, 8000, nullptr);
+    EnableWindow(g_hBtnStart, FALSE); EnableWindow(g_hBtnStop, TRUE);
+    // 启动心跳(轮询 /health)
+    startHeartbeat(port);
+    CreateThread(nullptr, 0, (LPTHREAD_START_ROUTINE)waitExitThread, nullptr, 0, nullptr);
     if (SendMessageW(g_hChkAutoBrowser, BM_GETCHECK, 0, 0) == BST_CHECKED) {
         std::wstring url = L"http://" + std::wstring(trim(ip).empty()?L"127.0.0.1":trim(ip)) + L":" + port;
         ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
@@ -430,8 +452,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         size_t pos = g_exeDir.find_last_of(L"\\/");
         if (pos != std::wstring::npos) g_exeDir = g_exeDir.substr(0, pos);
 
-        // 布局:左侧表单,右侧日志(cmd 风格)
-        const int LX = 16, PW = 371, RX = 395, RW = 400, LH = 20;
+        // 布局:单列表单,勾选框统一在输入框下方,无日志框
+        const int LX = 16, PW = 371, LH = 20;
         const int LW0 = 56, IX = LX + LW0 + 8;   // 标签宽 + 间距
         int y = 8;
         // 状态两行:CPU+内存 / 显卡
@@ -460,34 +482,31 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_hComboThink = CreateWindowW(L"COMBOBOX", L"", WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST|WS_VSCROLL, IX+240, y, 46, 200, hwnd, (HMENU)IDC_COMBO_THINK, nullptr, nullptr);
         for (auto* s : {L"off", L"on", L"auto"}) SendMessageW(g_hComboThink, CB_ADDSTRING, 0, (LPARAM)s);
         y += 30;
-        // 开关
-        g_hChkFA = CreateWindowW(L"BUTTON", L"Flash Attention", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX, y, 118, LH, hwnd, (HMENU)IDC_CHK_FA, nullptr, nullptr);
-        g_hChkKV = CreateWindowW(L"BUTTON", L"KV 量化", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX+126, y, 76, LH, hwnd, (HMENU)IDC_CHK_KV, nullptr, nullptr);
-        g_hChkAutoBrowser = CreateWindowW(L"BUTTON", L"自动开浏览器", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX+210, y, 120, LH, hwnd, (HMENU)IDC_CHK_AUTOBROWSER, nullptr, nullptr);
-        y += 28;
-        // 温度 / 生成上限(同行)
+        // 温度 / 生成上限(输入框,在勾选框上方)
         addLabel(hwnd, L"温度:", LX, y+2, LW0, LH);
         g_hEditTemp = CreateWindowW(L"EDIT", L"0.7", WS_CHILD|WS_VISIBLE|WS_BORDER, IX, y, 60, LH+4, hwnd, (HMENU)IDC_EDIT_TEMP, nullptr, nullptr);
         addLabel(hwnd, L"生成上限:", IX+70, y+2, 64, LH);
         g_hEditMaxTok = CreateWindowW(L"EDIT", L"8192", WS_CHILD|WS_VISIBLE|WS_BORDER, IX+134, y, 60, LH+4, hwnd, (HMENU)IDC_EDIT_MAXTOK, nullptr, nullptr);
         y += 34;
-        // 启动时自动加载所选模型(router 模式 load-on-startup)
+        // 勾选行 1:性能选项
+        g_hChkFA = CreateWindowW(L"BUTTON", L"Flash Attention", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX, y, 118, LH, hwnd, (HMENU)IDC_CHK_FA, nullptr, nullptr);
+        g_hChkKV = CreateWindowW(L"BUTTON", L"KV 量化", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX+126, y, 76, LH, hwnd, (HMENU)IDC_CHK_KV, nullptr, nullptr);
+        g_hChkAutoBrowser = CreateWindowW(L"BUTTON", L"自动开浏览器", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX+210, y, 120, LH, hwnd, (HMENU)IDC_CHK_AUTOBROWSER, nullptr, nullptr);
+        y += 28;
+        // 勾选行 2:预载 / 调试
         g_hChkPreload = CreateWindowW(L"BUTTON", L"启动自动加载所选模型", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX, y, 176, LH, hwnd, (HMENU)IDC_CHK_PRELOAD, nullptr, nullptr);
         g_hChkDebug = CreateWindowW(L"BUTTON", L"调试模式(独立窗口)", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX+182, y, 172, LH, hwnd, (HMENU)IDC_CHK_DEBUG, nullptr, nullptr);
         y += 28;
-        // 按钮(相对左侧表单居中,与上行保持间距)
+        // 心跳状态行(按钮上方)
+        g_hHeartbeat = CreateWindowW(L"STATIC", L"○ 服务未运行", WS_CHILD|WS_VISIBLE, LX, y, PW, LH, hwnd, (HMENU)IDC_STATIC_HEARTBEAT, nullptr, nullptr);
+        y += 28;
+        // 按钮(相对左侧表单居中)
         y += 42;
         const int BTN_W = 90, BTN_GAP = 10;
         int btnX = LX + (PW - (BTN_W * 3 + BTN_GAP * 2)) / 2;
         g_hBtnStart = CreateWindowW(L"BUTTON", L"启 动", WS_CHILD|WS_VISIBLE, btnX, y, BTN_W, 30, hwnd, (HMENU)IDC_BTN_START, nullptr, nullptr);
         g_hBtnStop = CreateWindowW(L"BUTTON", L"停 止", WS_CHILD|WS_VISIBLE, btnX+BTN_W+BTN_GAP, y, BTN_W, 30, hwnd, (HMENU)IDC_BTN_STOP, nullptr, nullptr);
         g_hBtnRedetect = CreateWindowW(L"BUTTON", L"重新检测", WS_CHILD|WS_VISIBLE, btnX+(BTN_W+BTN_GAP)*2, y, BTN_W, 30, hwnd, (HMENU)IDC_BTN_REDETECT, nullptr, nullptr);
-        // 右侧日志(cmd 风格)
-        g_hLog = CreateWindowW(L"EDIT", L"", WS_CHILD|WS_VISIBLE|WS_BORDER|ES_MULTILINE|ES_AUTOVSCROLL|ES_READONLY|WS_VSCROLL,
-            RX, 12, RW, 250, hwnd, (HMENU)IDC_EDIT_LOG, nullptr, nullptr);
-        HFONT hfLog = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 0, 0, FIXED_PITCH, 0, L"Consolas");
-        SendMessageW(g_hLog, WM_SETFONT, (WPARAM)hfLog, TRUE);
-        g_hLogBrush = CreateSolidBrush(RGB(12, 12, 12));
 
         EnableWindow(g_hBtnStop, FALSE);
         scanModels();
@@ -524,10 +543,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CTLCOLORSTATIC: {
         HDC hdc = (HDC)wp;
         HWND h = (HWND)lp;
-        if (h == g_hLog) {
-            SetTextColor(hdc, RGB(0xCC, 0xCC, 0xCC));
-            SetBkColor(hdc, RGB(12, 12, 12));
-            return (LRESULT)g_hLogBrush;
+        if (h == g_hHeartbeat) {
+            if (g_pi.hProcess) {
+                SetTextColor(hdc, RGB(0x00, 0x99, 0x00));   // 运行中:绿色
+            } else {
+                SetTextColor(hdc, RGB(0x88, 0x88, 0x88));   // 未运行:灰色
+            }
+            SetBkColor(hdc, GetSysColor(COLOR_BTNFACE));
+            return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);
         }
         break;
     }
@@ -548,22 +571,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         break;
     }
-    case WM_TIMER:
-        if (wp == 1) {          // 启动日志刷完后的 WebUI 提示
-            KillTimer(hwnd, 1);
-            logLine(L"[启动器] WebUI: " + g_webUrl);
-        }
-        return 0;
-    case WM_USER+1: {
-        wchar_t* line = (wchar_t*)lp;
-        if (line) { logLine(line); free(line); }
+    case WM_USER+2: {
+        // 进程退出:清理句柄,恢复按钮,停止心跳
+        if (g_pi.hProcess) { CloseHandle(g_pi.hProcess); CloseHandle(g_pi.hThread); g_pi = {}; }
+        EnableWindow(g_hBtnStart, TRUE); EnableWindow(g_hBtnStop, FALSE);
+        stopHeartbeat();
         return 0;
     }
-    case WM_USER+2: {
-        if (g_pi.hProcess) { WaitForSingleObject(g_pi.hProcess, 0); CloseHandle(g_pi.hProcess); CloseHandle(g_pi.hThread); g_pi = {}; }
-        if (g_hReadPipe != INVALID_HANDLE_VALUE) { CloseHandle(g_hReadPipe); g_hReadPipe = INVALID_HANDLE_VALUE; }
-        EnableWindow(g_hBtnStart, TRUE); EnableWindow(g_hBtnStop, FALSE);
-            logLine(L"[启动器] 进程已退出");
+    case WM_USER+3: {
+        // 心跳线程回传状态
+        if (g_hHeartbeat) {
+            SetWindowTextW(g_hHeartbeat, g_beatStatus.c_str());
+            InvalidateRect(hwnd, nullptr, TRUE);
+        }
         return 0;
     }
     case WM_CLOSE:
@@ -571,7 +591,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         ShowWindow(hwnd, SW_HIDE);
         return 0;
     case WM_DESTROY:
-        if (g_hLogBrush) DeleteObject(g_hLogBrush);
+        stopHeartbeat();
         Shell_NotifyIconW(NIM_DELETE, &g_nid);
         PostQuitMessage(0);
         return 0;
@@ -593,7 +613,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     RegisterClassExW(&wc);
 
     HWND hwnd = CreateWindowW(CLASS, L"Llama Launcher       ·by aceneil", WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 840, 372, nullptr, nullptr, hInst, nullptr);
+        CW_USEDEFAULT, CW_USEDEFAULT, 430, 400, nullptr, nullptr, hInst, nullptr);
     ShowWindow(hwnd, nCmdShow);
 
     MSG msg;
