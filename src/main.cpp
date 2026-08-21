@@ -246,7 +246,24 @@ static void startServer() {
     args += L" --models-dir \"" + g_exeDir + L"\\models\"";
     args += L" --host " + std::wstring(trim(ip).empty()?L"127.0.0.1":trim(ip));
     args += L" --port " + std::wstring(port);
-    args += L" -c " + ctxStr;
+
+    // ★ --models-max:按显存档位限制同时加载的模型数(≤24G → 1)。
+    //   不传时 router 默认 4,fit 会按"可能装 4 个模型"压缩单个模型的显存,
+    //   导致上下文被压到 256 之类的最小值。与一键脚本 ps1 的档位逻辑一致。
+    {
+        HwInfo hw = detectHardware();
+        int maxModels = (hw.vramGB >= 32) ? 2 : 1;
+        if (hasFlag(L"--models-max")) args += L" --models-max " + std::to_wstring(maxModels);
+    }
+
+    // 上下文:下拉是 4K/8K/16K/32K,转成纯数字传(避免 K 后缀解析差异)
+    {
+        std::wstring ctxNum = L"4096";
+        if      (ctxStr == L"8K")  ctxNum = L"8192";
+        else if (ctxStr == L"16K") ctxNum = L"16384";
+        else if (ctxStr == L"32K") ctxNum = L"32768";
+        args += L" -c " + ctxNum;
+    }
 
     // ★ 启动时自动加载所选模型(router 模式的 load-on-startup)
     //    写入 exe 同目录 presets.ini 的 [模型ID] 段,并传 --models-preset;
