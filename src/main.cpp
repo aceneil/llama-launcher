@@ -310,13 +310,19 @@ static void startServer() {
     // ★ 启动时自动加载所选模型(router 模式的 load-on-startup)
     //    写入 exe 同目录 presets.ini 的 [模型ID] 段,并传 --models-preset;
     //    只更新本模型段,不破坏文件里其他已有配置。
-    if (SendMessageW(g_hChkPreload, BM_GETCHECK, 0, 0) == BST_CHECKED &&
-        hasFlag(L"--models-preset")) {
-        int sel = SendMessageW(g_hComboModel, CB_GETCURSEL, 0, 0);
-        if (sel >= 0 && sel < (int)g_models.size()) {
-            std::wstring presetPath = g_exeDir + L"\\presets.ini";
-            WritePrivateProfileStringW(g_models[sel].second.c_str(), L"load-on-startup", L"true", presetPath.c_str());
-            args += L" --models-preset \"" + presetPath + L"\"";
+    if (hasFlag(L"--models-preset")) {
+        std::wstring presetPath = g_exeDir + L"\\presets.ini";
+        // 先清除所有模型段的 load-on-startup,再写当前选中的。
+        // 否则多次换模型勾选会累积多个预载段,超过 --models-max
+        // 时 llama-server router 初始化直接失败(整服务秒退)。
+        for (auto& m : g_models)
+            WritePrivateProfileStringW(m.second.c_str(), L"load-on-startup", nullptr, presetPath.c_str());
+        if (SendMessageW(g_hChkPreload, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+            int sel = SendMessageW(g_hComboModel, CB_GETCURSEL, 0, 0);
+            if (sel >= 0 && sel < (int)g_models.size()) {
+                WritePrivateProfileStringW(g_models[sel].second.c_str(), L"load-on-startup", L"true", presetPath.c_str());
+                args += L" --models-preset \"" + presetPath + L"\"";
+            }
         }
     }
     if (hasFlag(L"--jinja")) args += L" --jinja";
