@@ -554,7 +554,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
     RegisterClassExW(&wc);
 
     HWND hwnd = CreateWindowW(CLASS, L"Llama Launcher       ·by aceneil", WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 840, 340, nullptr, nullptr, hInst, nullptr);
+        CW_USEDEFAULT, CW_USEDEFAULT, 840, 372, nullptr, nullptr, hInst, nullptr);
     ShowWindow(hwnd, nCmdShow);
 
     MSG msg;
