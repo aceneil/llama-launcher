@@ -20,7 +20,7 @@
 enum { IDC_COMBO_MODEL=101, IDC_EDIT_IP, IDC_EDIT_PORT,
        IDC_COMBO_BACKEND, IDC_COMBO_CTX, IDC_COMBO_THINK,
        IDC_CHK_FA, IDC_CHK_KV, IDC_CHK_AUTOBROWSER,
-       IDC_CHK_PRELOAD,
+       IDC_CHK_PRELOAD, IDC_CHK_DEBUG,
        IDC_EDIT_TEMP, IDC_EDIT_MAXTOK, IDC_BTN_START, IDC_BTN_STOP,
        IDC_EDIT_LOG, IDC_STATIC_STATUS, IDC_BTN_REDETECT };
 #define IDI_ICON1 101
@@ -32,7 +32,7 @@ enum { IDC_COMBO_MODEL=101, IDC_EDIT_IP, IDC_EDIT_PORT,
 static NOTIFYICONDATAW g_nid = {};
 static HWND g_hwnd, g_hComboModel, g_hEditIP, g_hEditPort, g_hComboBackend,
             g_hComboCtx, g_hComboThink, g_hChkFA, g_hChkKV, g_hChkAutoBrowser,
-            g_hChkPreload,
+            g_hChkPreload, g_hChkDebug,
             g_hEditTemp, g_hEditMaxTok, g_hBtnStart, g_hBtnStop, g_hBtnRedetect, g_hLog, g_hStatus, g_hStatus2;
 static std::wstring g_webUrl = L"http://localhost:8080";
 static PROCESS_INFORMATION g_pi = {};
@@ -299,24 +299,43 @@ static void startServer() {
     if (hasFlag(L"--fit-target")) args += L" --fit-target 1024";
     else if (g_help.find(L"cuda") != std::wstring::npos) args += L" -ngl 99";
 
+    bool debug = SendMessageW(g_hChkDebug, BM_GETCHECK, 0, 0) == BST_CHECKED;
     SECURITY_ATTRIBUTES sa = {sizeof(sa), nullptr, TRUE};
-    HANDLE r, w; if (!CreatePipe(&r, &w, &sa, 0)) return;
-    SetHandleInformation(r, HANDLE_FLAG_INHERIT, 0);
-    STARTUPINFOW si = {sizeof(si)};
-    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
-    si.hStdOutput = si.hStdError = w; si.wShowWindow = SW_HIDE;
     std::vector<wchar_t> cmdline(args.begin(), args.end()); cmdline.push_back(0);
-    BOOL ok = CreateProcessW(nullptr, cmdline.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, g_exeDir.c_str(), &si, &g_pi);
-    CloseHandle(w);
-    if (!ok) {
-        logLine(L"[启动器] 启动失败: " + std::to_wstring(GetLastError()));
-        CloseHandle(r); return;
+    if (debug) {
+        // 调试模式:独立控制台窗口直接运行,日志留在窗口里可滚动观察,
+        // 关闭窗口即停止服务。不接管管道,启动器日志框只显示摘要。
+        STARTUPINFOW sid = {sizeof(sid)};
+        sid.dwFlags = STARTF_USESHOWWINDOW;
+        sid.wShowWindow = SW_SHOWNORMAL;
+        BOOL ok = CreateProcessW(nullptr, cmdline.data(), nullptr, nullptr, TRUE,
+                                 CREATE_NEW_CONSOLE, nullptr, g_exeDir.c_str(), &sid, &g_pi);
+        if (!ok) {
+            logLine(L"[启动器] 启动失败: " + std::to_wstring(GetLastError()));
+            return;
+        }
+        EnableWindow(g_hBtnStart, FALSE); EnableWindow(g_hBtnStop, TRUE);
+        logLine(L"[启动器] 调试模式:llama-server 运行在独立窗口(关闭窗口即停止)");
+        logLine(L"[启动器] 启动命令:");
+        logLine(args);
+    } else {
+        HANDLE r, w; if (!CreatePipe(&r, &w, &sa, 0)) return;
+        SetHandleInformation(r, HANDLE_FLAG_INHERIT, 0);
+        STARTUPINFOW si = {sizeof(si)};
+        si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+        si.hStdOutput = si.hStdError = w; si.wShowWindow = SW_HIDE;
+        BOOL ok = CreateProcessW(nullptr, cmdline.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, g_exeDir.c_str(), &si, &g_pi);
+        CloseHandle(w);
+        if (!ok) {
+            logLine(L"[启动器] 启动失败: " + std::to_wstring(GetLastError()));
+            CloseHandle(r); return;
+        }
+        g_hReadPipe = r;
+        EnableWindow(g_hBtnStart, FALSE); EnableWindow(g_hBtnStop, TRUE);
+        logLine(L"[启动器] 启动命令:");
+        logLine(args);
+        CreateThread(nullptr, 0, (LPTHREAD_START_ROUTINE)readPipeThread, nullptr, 0, nullptr);
     }
-    g_hReadPipe = r;
-    EnableWindow(g_hBtnStart, FALSE); EnableWindow(g_hBtnStop, TRUE);
-    logLine(L"[启动器] 启动命令:");
-    logLine(args);
-    CreateThread(nullptr, 0, (LPTHREAD_START_ROUTINE)readPipeThread, nullptr, 0, nullptr);
     // 更新 WebUI 地址(0.0.0.0 → localhost),启动日志末尾会以链接形式输出
     {
         std::wstring ipv = trim(ip).empty() ? L"localhost" : trim(ip);
@@ -351,6 +370,7 @@ static void saveConfig() {
     WritePrivateProfileStringW(L"launcher", L"kv", SendMessageW(g_hChkKV,BM_GETCHECK,0,0)==BST_CHECKED?L"1":L"0", iniPath().c_str());
     WritePrivateProfileStringW(L"launcher", L"autobrowser", SendMessageW(g_hChkAutoBrowser,BM_GETCHECK,0,0)==BST_CHECKED?L"1":L"0", iniPath().c_str());
     WritePrivateProfileStringW(L"launcher", L"preload", SendMessageW(g_hChkPreload,BM_GETCHECK,0,0)==BST_CHECKED?L"1":L"0", iniPath().c_str());
+    WritePrivateProfileStringW(L"launcher", L"debug", SendMessageW(g_hChkDebug,BM_GETCHECK,0,0)==BST_CHECKED?L"1":L"0", iniPath().c_str());
     WritePrivateProfileStringW(L"launcher", L"temp", temp, iniPath().c_str());
     WritePrivateProfileStringW(L"launcher", L"maxtok", mtok, iniPath().c_str());
 }
@@ -373,6 +393,7 @@ static void loadConfig() {
     SendMessageW(g_hChkKV, BM_SETCHECK, GetPrivateProfileIntW(L"launcher", L"kv", 1, iniPath().c_str()) ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(g_hChkAutoBrowser, BM_SETCHECK, GetPrivateProfileIntW(L"launcher", L"autobrowser", 0, iniPath().c_str()) ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(g_hChkPreload, BM_SETCHECK, GetPrivateProfileIntW(L"launcher", L"preload", 1, iniPath().c_str()) ? BST_CHECKED : BST_UNCHECKED, 0);
+    SendMessageW(g_hChkDebug, BM_SETCHECK, GetPrivateProfileIntW(L"launcher", L"debug", 0, iniPath().c_str()) ? BST_CHECKED : BST_UNCHECKED, 0);
 }
 
 // ---------------- 窗口 ----------------
@@ -452,6 +473,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         y += 34;
         // 启动时自动加载所选模型(router 模式 load-on-startup)
         g_hChkPreload = CreateWindowW(L"BUTTON", L"启动自动加载所选模型(写 presets.ini)", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX, y, 280, LH, hwnd, (HMENU)IDC_CHK_PRELOAD, nullptr, nullptr);
+        g_hChkDebug = CreateWindowW(L"BUTTON", L"调试模式(独立窗口)", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX+282, y, 160, LH, hwnd, (HMENU)IDC_CHK_DEBUG, nullptr, nullptr);
         y += 28;
         // 按钮(相对左侧表单居中,与上行保持间距)
         y += 42;
