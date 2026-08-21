@@ -463,7 +463,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // 开关
         g_hChkFA = CreateWindowW(L"BUTTON", L"Flash Attention", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX, y, 118, LH, hwnd, (HMENU)IDC_CHK_FA, nullptr, nullptr);
         g_hChkKV = CreateWindowW(L"BUTTON", L"KV 量化", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX+126, y, 76, LH, hwnd, (HMENU)IDC_CHK_KV, nullptr, nullptr);
-        g_hChkAutoBrowser = CreateWindowW(L"BUTTON", L"自动开浏览器", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX+210, y, 100, LH, hwnd, (HMENU)IDC_CHK_AUTOBROWSER, nullptr, nullptr);
+        g_hChkAutoBrowser = CreateWindowW(L"BUTTON", L"自动开浏览器", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX+210, y, 120, LH, hwnd, (HMENU)IDC_CHK_AUTOBROWSER, nullptr, nullptr);
         y += 28;
         // 温度 / 生成上限(同行)
         addLabel(hwnd, L"温度:", LX, y+2, LW0, LH);
@@ -472,8 +472,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_hEditMaxTok = CreateWindowW(L"EDIT", L"8192", WS_CHILD|WS_VISIBLE|WS_BORDER, IX+134, y, 60, LH+4, hwnd, (HMENU)IDC_EDIT_MAXTOK, nullptr, nullptr);
         y += 34;
         // 启动时自动加载所选模型(router 模式 load-on-startup)
-        g_hChkPreload = CreateWindowW(L"BUTTON", L"启动自动加载所选模型(写 presets.ini)", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX, y, 280, LH, hwnd, (HMENU)IDC_CHK_PRELOAD, nullptr, nullptr);
-        g_hChkDebug = CreateWindowW(L"BUTTON", L"调试模式(独立窗口)", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX+282, y, 160, LH, hwnd, (HMENU)IDC_CHK_DEBUG, nullptr, nullptr);
+        g_hChkPreload = CreateWindowW(L"BUTTON", L"启动自动加载所选模型", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX, y, 176, LH, hwnd, (HMENU)IDC_CHK_PRELOAD, nullptr, nullptr);
+        g_hChkDebug = CreateWindowW(L"BUTTON", L"调试模式(独立窗口)", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX+182, y, 172, LH, hwnd, (HMENU)IDC_CHK_DEBUG, nullptr, nullptr);
         y += 28;
         // 按钮(相对左侧表单居中,与上行保持间距)
         y += 42;
