@@ -22,7 +22,7 @@
 enum { IDC_COMBO_MODEL=101, IDC_EDIT_IP, IDC_EDIT_PORT,
        IDC_COMBO_BACKEND, IDC_COMBO_CTX, IDC_COMBO_THINK,
        IDC_CHK_FA, IDC_CHK_KV, IDC_CHK_AUTOBROWSER,
-       IDC_CHK_PRELOAD, IDC_CHK_DEBUG,
+       IDC_CHK_PRELOAD, IDC_COMBO_MODE,
        IDC_EDIT_TEMP, IDC_EDIT_MAXTOK, IDC_BTN_START, IDC_BTN_STOP,
        IDC_EDIT_LOG, IDC_STATIC_STATUS, IDC_BTN_REDETECT, IDC_STATIC_HEARTBEAT };
 #define IDI_ICON1 101
@@ -34,7 +34,7 @@ enum { IDC_COMBO_MODEL=101, IDC_EDIT_IP, IDC_EDIT_PORT,
 static NOTIFYICONDATAW g_nid = {};
 static HWND g_hwnd, g_hComboModel, g_hEditIP, g_hEditPort, g_hComboBackend,
             g_hComboCtx, g_hComboThink, g_hChkFA, g_hChkKV, g_hChkAutoBrowser,
-            g_hChkPreload, g_hChkDebug,
+            g_hChkPreload, g_hComboMode,
             g_hEditTemp, g_hEditMaxTok, g_hBtnStart, g_hBtnStop, g_hBtnRedetect, g_hStatus, g_hStatus2, g_hHeartbeat;
 static std::wstring g_webUrl = L"http://localhost:8080";
 static PROCESS_INFORMATION g_pi = {};
@@ -44,6 +44,7 @@ static HANDLE g_hBeatThread = nullptr;
 static volatile bool g_beatRunning = false;
 static std::wstring g_beatPort = L"8080";
 static std::wstring g_beatStatus = L"○ 服务未运行";   // 心跳线程 → UI 的当前状态文本
+static bool g_forceConsole = false;                   // 本次启动是否强制模式(cmd /k 包装)
 
 static std::wstring ws(const std::string& s) {
     std::wstring r; r.reserve(s.size());
@@ -253,9 +254,16 @@ static void waitExitThread(LPVOID) {
 
 static void stopServer() {
     if (g_pi.hProcess) {
+        if (g_forceConsole) {
+            // 强制模式:llama-server 跑在 cmd /k 包装的独立窗口里,
+            // 需用 taskkill /T 连子进程一起结束,否则只剩窗口空壳。
+            std::wstring kill = L"taskkill /F /T /PID " + std::to_wstring(g_pi.dwProcessId) + L" >nul 2>&1";
+            runCmd(kill);
+        }
         TerminateProcess(g_pi.hProcess, 0);
         CloseHandle(g_pi.hProcess); CloseHandle(g_pi.hThread);
         g_pi = {};
+        g_forceConsole = false;
     }
     EnableWindow(g_hBtnStart, TRUE); EnableWindow(g_hBtnStop, FALSE);
     stopHeartbeat();
@@ -344,13 +352,23 @@ static void startServer() {
     if (hasFlag(L"--fit-target")) args += L" --fit-target 1024";
     else if (g_help.find(L"cuda") != std::wstring::npos) args += L" -ngl 99";
 
-    bool debug = SendMessageW(g_hChkDebug, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    std::vector<wchar_t> cmdline(args.begin(), args.end()); cmdline.push_back(0);
+    // 运行模式:普通=后台静默(点停止自动关闭);强制=cmd /k 独立窗口,
+    // llama-server 崩溃/退出后窗口保留,方便看错误日志。
+    int modeIdx = SendMessageW(g_hComboMode, CB_GETCURSEL, 0, 0);
+    g_forceConsole = (modeIdx == 1);
+    std::vector<wchar_t> cmdline;
+    if (g_forceConsole) {
+        // cmd /k 双层引号:cmd 会剥掉最外层引号,执行里面的完整命令
+        std::wstring wrapped = L"cmd.exe /k \"\"" + args + L"\"";
+        cmdline.assign(wrapped.begin(), wrapped.end());
+    } else {
+        cmdline.assign(args.begin(), args.end());
+    }
+    cmdline.push_back(0);
     STARTUPINFOW si = {sizeof(si)};
     si.dwFlags = STARTF_USESHOWWINDOW;
-    if (debug) {
-        // 调试模式:独立控制台窗口直接运行,日志留在窗口里可滚动观察,
-        // 关闭窗口即停止服务。
+    if (g_forceConsole) {
+        // 强制模式:独立控制台窗口,日志可滚动观察,关闭窗口即停止服务
         si.wShowWindow = SW_SHOWNORMAL;
         BOOL ok = CreateProcessW(nullptr, cmdline.data(), nullptr, nullptr, TRUE,
                                  CREATE_NEW_CONSOLE, nullptr, g_exeDir.c_str(), &si, &g_pi);
@@ -359,7 +377,7 @@ static void startServer() {
             return;
         }
     } else {
-        // 普通模式:后台静默运行(无日志框),通过心跳观察状态
+        // 普通模式:后台静默运行,通过心跳观察状态
         si.wShowWindow = SW_HIDE;
         BOOL ok = CreateProcessW(nullptr, cmdline.data(), nullptr, nullptr, TRUE,
                                  CREATE_NO_WINDOW, nullptr, g_exeDir.c_str(), &si, &g_pi);
@@ -398,7 +416,7 @@ static void saveConfig() {
     WritePrivateProfileStringW(L"launcher", L"kv", SendMessageW(g_hChkKV,BM_GETCHECK,0,0)==BST_CHECKED?L"1":L"0", iniPath().c_str());
     WritePrivateProfileStringW(L"launcher", L"autobrowser", SendMessageW(g_hChkAutoBrowser,BM_GETCHECK,0,0)==BST_CHECKED?L"1":L"0", iniPath().c_str());
     WritePrivateProfileStringW(L"launcher", L"preload", SendMessageW(g_hChkPreload,BM_GETCHECK,0,0)==BST_CHECKED?L"1":L"0", iniPath().c_str());
-    WritePrivateProfileStringW(L"launcher", L"debug", SendMessageW(g_hChkDebug,BM_GETCHECK,0,0)==BST_CHECKED?L"1":L"0", iniPath().c_str());
+    WritePrivateProfileStringW(L"launcher", L"mode", std::to_wstring(SendMessageW(g_hComboMode, CB_GETCURSEL, 0, 0)).c_str(), iniPath().c_str());
     WritePrivateProfileStringW(L"launcher", L"temp", temp, iniPath().c_str());
     WritePrivateProfileStringW(L"launcher", L"maxtok", mtok, iniPath().c_str());
 }
@@ -421,7 +439,9 @@ static void loadConfig() {
     SendMessageW(g_hChkKV, BM_SETCHECK, GetPrivateProfileIntW(L"launcher", L"kv", 1, iniPath().c_str()) ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(g_hChkAutoBrowser, BM_SETCHECK, GetPrivateProfileIntW(L"launcher", L"autobrowser", 0, iniPath().c_str()) ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(g_hChkPreload, BM_SETCHECK, GetPrivateProfileIntW(L"launcher", L"preload", 1, iniPath().c_str()) ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessageW(g_hChkDebug, BM_SETCHECK, GetPrivateProfileIntW(L"launcher", L"debug", 0, iniPath().c_str()) ? BST_CHECKED : BST_UNCHECKED, 0);
+    int mode = GetPrivateProfileIntW(L"launcher", L"mode", 0, iniPath().c_str());
+    if (mode < 0 || mode > 1) mode = 0;
+    SendMessageW(g_hComboMode, CB_SETCURSEL, mode, 0);
 }
 
 // ---------------- 窗口 ----------------
@@ -499,9 +519,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_hChkKV = CreateWindowW(L"BUTTON", L"KV 量化", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX+126, y, 76, LH, hwnd, (HMENU)IDC_CHK_KV, nullptr, nullptr);
         g_hChkAutoBrowser = CreateWindowW(L"BUTTON", L"自动开浏览器", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX+210, y, 120, LH, hwnd, (HMENU)IDC_CHK_AUTOBROWSER, nullptr, nullptr);
         y += 28;
-        // 勾选行 2:预载 / 调试
+        // 勾选行 2:预载 / 运行模式
         g_hChkPreload = CreateWindowW(L"BUTTON", L"启动自动加载所选模型", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX, y, 176, LH, hwnd, (HMENU)IDC_CHK_PRELOAD, nullptr, nullptr);
-        g_hChkDebug = CreateWindowW(L"BUTTON", L"调试模式(独立窗口)", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX+182, y, 172, LH, hwnd, (HMENU)IDC_CHK_DEBUG, nullptr, nullptr);
+        addLabel(hwnd, L"运行模式:", LX+182, y+2, 60, LH);
+        g_hComboMode = CreateWindowW(L"COMBOBOX", L"", WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST|WS_VSCROLL, LX+242, y, 100, 200, hwnd, (HMENU)IDC_COMBO_MODE, nullptr, nullptr);
+        for (auto* s : {L"普通模式", L"强制模式"}) SendMessageW(g_hComboMode, CB_ADDSTRING, 0, (LPARAM)s);
         y += 28;
         // 心跳状态行(按钮上方)
         g_hHeartbeat = CreateWindowW(L"STATIC", L"○ 服务未运行", WS_CHILD|WS_VISIBLE, LX, y, PW, LH, hwnd, (HMENU)IDC_STATIC_HEARTBEAT, nullptr, nullptr);
@@ -580,6 +602,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_USER+2: {
         // 进程退出:清理句柄,恢复按钮,停止心跳
         if (g_pi.hProcess) { CloseHandle(g_pi.hProcess); CloseHandle(g_pi.hThread); g_pi = {}; }
+        g_forceConsole = false;
         EnableWindow(g_hBtnStart, TRUE); EnableWindow(g_hBtnStop, FALSE);
         stopHeartbeat();
         return 0;
