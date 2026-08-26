@@ -35,7 +35,7 @@ static NOTIFYICONDATAW g_nid = {};
 static HWND g_hwnd, g_hComboModel, g_hEditIP, g_hEditPort, g_hComboBackend,
             g_hComboCtx, g_hComboThink, g_hChkFA, g_hChkKV, g_hChkAutoBrowser,
             g_hChkPreload, g_hComboMode,
-            g_hEditTemp, g_hEditMaxTok, g_hBtnStart, g_hBtnStop, g_hBtnRedetect, g_hStatus, g_hStatus2, g_hHeartbeat;
+            g_hEditTemp, g_hEditMaxTok, g_hBtnStart, g_hBtnStop, g_hBtnRedetect, g_hStatus, g_hStatus2, g_hHeartbeat, g_hHeartbeat2;
 static std::wstring g_webUrl = L"http://localhost:8080";
 static PROCESS_INFORMATION g_pi = {};
 static std::wstring g_exeDir;
@@ -487,8 +487,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_hStatus2 = CreateWindowW(L"STATIC", L"", WS_CHILD|WS_VISIBLE, LX, y+20, PW, LH, hwnd, (HMENU)IDC_STATIC_STATUS, nullptr, nullptr);
         y += 44;
         // 模型(下拉展开宽度 620,显示全名)
-        addLabel(hwnd, L"模型:", LX, y+2, LW0, LH);
-        g_hComboModel = CreateWindowW(L"COMBOBOX", L"", WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST|WS_VSCROLL, IX, y, PW-LW0-8, 200, hwnd, (HMENU)IDC_COMBO_MODEL, nullptr, nullptr);
+        {
+            const int MLW = 76;   // 「启动模型:」标签宽
+            addLabel(hwnd, L"启动模型:", LX, y+2, MLW, LH);
+            g_hComboModel = CreateWindowW(L"COMBOBOX", L"", WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST|WS_VSCROLL, LX+MLW+8, y, PW-MLW-8, 200, hwnd, (HMENU)IDC_COMBO_MODEL, nullptr, nullptr);
+        }
         SendMessageW(g_hComboModel, CB_SETDROPPEDWIDTH, 620, 0);
         y += 30;
         // IP + 端口
@@ -521,13 +524,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         y += 28;
         // 勾选行 2:预载 / 运行模式
         g_hChkPreload = CreateWindowW(L"BUTTON", L"启动自动加载所选模型", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX, y, 176, LH, hwnd, (HMENU)IDC_CHK_PRELOAD, nullptr, nullptr);
-        addLabel(hwnd, L"运行模式:", LX+182, y+2, 60, LH);
+        addLabel(hwnd, L"运行模式:", LX+182, y+4, 60, LH);   // y+4:与 checkbox 文字垂直居中对齐
         g_hComboMode = CreateWindowW(L"COMBOBOX", L"", WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST|WS_VSCROLL, LX+242, y, 100, 200, hwnd, (HMENU)IDC_COMBO_MODE, nullptr, nullptr);
         for (auto* s : {L"普通模式", L"强制模式"}) SendMessageW(g_hComboMode, CB_ADDSTRING, 0, (LPARAM)s);
         y += 28;
-        // 心跳状态行(按钮上方)
+        // 心跳状态行(按钮上方):第一行状态,第二行当前模型
         g_hHeartbeat = CreateWindowW(L"STATIC", L"○ 服务未运行", WS_CHILD|WS_VISIBLE, LX, y, PW, LH, hwnd, (HMENU)IDC_STATIC_HEARTBEAT, nullptr, nullptr);
-        y += 28;
+        g_hHeartbeat2 = CreateWindowW(L"STATIC", L"", WS_CHILD|WS_VISIBLE, LX, y+20, PW, LH, hwnd, (HMENU)IDC_STATIC_HEARTBEAT, nullptr, nullptr);
+        y += 48;
         // 按钮(相对左侧表单居中)
         y += 42;
         const int BTN_W = 90, BTN_GAP = 10;
@@ -571,7 +575,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CTLCOLORSTATIC: {
         HDC hdc = (HDC)wp;
         HWND h = (HWND)lp;
-        if (h == g_hHeartbeat) {
+        if (h == g_hHeartbeat || h == g_hHeartbeat2) {
             if (g_pi.hProcess) {
                 SetTextColor(hdc, RGB(0x00, 0x99, 0x00));   // 运行中:绿色
             } else {
@@ -611,6 +615,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // 心跳线程回传状态
         if (g_hHeartbeat) {
             SetWindowTextW(g_hHeartbeat, g_beatStatus.c_str());
+            // 第二行:服务正常时显示当前选择的模型
+            if (g_hHeartbeat2) {
+                if (g_beatStatus.find(L"●") != std::wstring::npos) {
+                    wchar_t modelName[256] = L"";
+                    int sel = (int)SendMessageW(g_hComboModel, CB_GETCURSEL, 0, 0);
+                    if (sel != CB_ERR) SendMessageW(g_hComboModel, CB_GETLBTEXT, sel, (LPARAM)modelName);
+                    SetWindowTextW(g_hHeartbeat2, (std::wstring(L"当前模型: ") + modelName).c_str());
+                } else {
+                    SetWindowTextW(g_hHeartbeat2, L"");
+                }
+            }
             InvalidateRect(hwnd, nullptr, TRUE);
         }
         return 0;
