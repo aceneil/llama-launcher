@@ -53,10 +53,11 @@ x86_64-w64-mingw32-g++ src/main.cpp -o "Llama Launcher.exe" -mwindows -municode 
 
 [MIT](LICENSE) © 2026 aceneil
 
-## 打赏
+## 赞助与支持
 
 如果项目对您有帮助请打赏我,作者目前只有5060ti-16g未能完整测试app可靠性,如给您带来不便请见谅。
 
 <div align="center">
   <img src="assets/wechat-reward.png" width="255" alt="微信打赏码">
+  <p>微信打赏码</p>
 </div>
