@@ -35,7 +35,7 @@ static NOTIFYICONDATAW g_nid = {};
 static HWND g_hwnd, g_hComboModel, g_hEditIP, g_hEditPort, g_hComboBackend,
             g_hComboCtx, g_hComboThink, g_hChkFA, g_hComboKV, g_hChkAutoBrowser,
             g_hChkPreload, g_hChkMode,
-            g_hEditTemp, g_hEditMaxTok, g_hBtnStart, g_hBtnStop, g_hBtnRedetect, g_hStatus, g_hStatus2, g_hHeartbeat, g_hHeartbeat2;
+            g_hEditTemp, g_hEditMaxTok, g_hBtnStart, g_hBtnStop, g_hBtnRedetect, g_hStatus, g_hStatus2, g_hHeartbeat, g_hHeartbeat2, g_hTooltip;
 static std::wstring g_webUrl = L"http://localhost:8080";
 static PROCESS_INFORMATION g_pi = {};
 static std::wstring g_exeDir;
@@ -45,6 +45,8 @@ static volatile bool g_beatRunning = false;
 static std::wstring g_beatPort = L"8080";
 static std::wstring g_beatStatus = L"○ 服务未运行";   // 心跳线程 → UI 的当前状态文本
 static bool g_forceConsole = false;                   // 本次启动是否强制模式(cmd /k 包装)
+static HANDLE g_hSingleMutex = nullptr;            // 单实例互斥锁:进程存活期间常开,CloseHandle 会让下次启动失败
+static std::wstring g_heartbeat2TipText;          // 心跳第二行完整文本(供 tooltip 悬停查看,避免长模型名被裁断)
 
 static std::wstring ws(const std::string& s) {
     std::wstring r; r.reserve(s.size());
@@ -527,26 +529,40 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         g_hComboThink = CreateWindowW(L"COMBOBOX", L"", WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST|WS_VSCROLL, IX+240, y, 46, 200, hwnd, (HMENU)IDC_COMBO_THINK, nullptr, nullptr);
         for (auto* s : {L"off", L"on", L"auto"}) SendMessageW(g_hComboThink, CB_ADDSTRING, 0, (LPARAM)s);
         y += 30;
-        // 采样度 / 生成上限(输入框,在勾选框上方)
+        // 采样度 / 生成上限 / KV 量化(同一行紧凑排列;KV 上移后勾选行 1 不再放 KV)
         addLabel(hwnd, L"采样度:", LX, y+2, LW0, LH);
-        g_hEditTemp = CreateWindowW(L"EDIT", L"0.7", WS_CHILD|WS_VISIBLE|WS_BORDER, IX, y, 60, LH+4, hwnd, (HMENU)IDC_EDIT_TEMP, nullptr, nullptr);
-        addLabel(hwnd, L"生成上限:", IX+70, y+2, 64, LH);
-        g_hEditMaxTok = CreateWindowW(L"EDIT", L"8192", WS_CHILD|WS_VISIBLE|WS_BORDER, IX+134, y, 60, LH+4, hwnd, (HMENU)IDC_EDIT_MAXTOK, nullptr, nullptr);
-        y += 34;
-        // 勾选行 1:性能选项
-        g_hChkFA = CreateWindowW(L"BUTTON", L"Flash Attention", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX, y, 118, LH, hwnd, (HMENU)IDC_CHK_FA, nullptr, nullptr);
-        addLabel(hwnd, L"KV:", LX+126, y+2, 28, LH);
-        g_hComboKV = CreateWindowW(L"COMBOBOX", L"", WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST|WS_VSCROLL, LX+156, y, 96, 200, hwnd, (HMENU)IDC_COMBO_KV, nullptr, nullptr);
+        g_hEditTemp = CreateWindowW(L"EDIT", L"0.7", WS_CHILD|WS_VISIBLE|WS_BORDER, IX, y, 46, LH+4, hwnd, (HMENU)IDC_EDIT_TEMP, nullptr, nullptr);
+        addLabel(hwnd, L"生成上限:", IX+56, y+2, 64, LH);
+        g_hEditMaxTok = CreateWindowW(L"EDIT", L"8192", WS_CHILD|WS_VISIBLE|WS_BORDER, IX+120, y, 46, LH+4, hwnd, (HMENU)IDC_EDIT_MAXTOK, nullptr, nullptr);
+        addLabel(hwnd, L"KV:", IX+170, y+2, 28, LH);
+        g_hComboKV = CreateWindowW(L"COMBOBOX", L"", WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST|WS_VSCROLL, IX+198, y, 92, 200, hwnd, (HMENU)IDC_COMBO_KV, nullptr, nullptr);
         for (auto* s : {L"无", L"Q4", L"Q8", L"Q8-Q4 混合"}) SendMessageW(g_hComboKV, CB_ADDSTRING, 0, (LPARAM)s);
-        g_hChkAutoBrowser = CreateWindowW(L"BUTTON", L"自动开浏览器", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX+258, y, 100, LH, hwnd, (HMENU)IDC_CHK_AUTOBROWSER, nullptr, nullptr);
+        SendMessageW(g_hComboKV, CB_SETDROPPEDWIDTH, 120, 0);   // 下拉全显,避免 "Q8-Q4 混合" 等被截
+        y += 34;
+        // 勾选行 1:Flash Attention + 自动开浏览器(KV 已上移)
+        g_hChkFA = CreateWindowW(L"BUTTON", L"Flash Attention", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX, y, 118, LH, hwnd, (HMENU)IDC_CHK_FA, nullptr, nullptr);
+        g_hChkAutoBrowser = CreateWindowW(L"BUTTON", L"自动开浏览器", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX+150, y, 100, LH, hwnd, (HMENU)IDC_CHK_AUTOBROWSER, nullptr, nullptr);
         y += 28;
         // 勾选行 2:预载 / 诊断模式(勾选 = cmd /k 独立窗口)
         g_hChkPreload = CreateWindowW(L"BUTTON", L"启动自动加载所选模型", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX, y, 176, LH, hwnd, (HMENU)IDC_CHK_PRELOAD, nullptr, nullptr);
         g_hChkMode = CreateWindowW(L"BUTTON", L"诊断模式", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX+182, y, 100, LH, hwnd, (HMENU)IDC_CHK_MODE, nullptr, nullptr);
         y += 28;
         // 心跳状态行(按钮上方):第一行状态,第二行当前模型
-        g_hHeartbeat = CreateWindowW(L"STATIC", L"○ 服务未运行", WS_CHILD|WS_VISIBLE, LX, y, PW, LH, hwnd, (HMENU)IDC_STATIC_HEARTBEAT, nullptr, nullptr);
-        g_hHeartbeat2 = CreateWindowW(L"STATIC", L"", WS_CHILD|WS_VISIBLE, LX, y+20, PW, LH, hwnd, (HMENU)IDC_STATIC_HEARTBEAT, nullptr, nullptr);
+        // 状态行加宽到 PW+16=387,与表单右缘对齐;长模型名/125% 缩放不再被裁
+        g_hHeartbeat = CreateWindowW(L"STATIC", L"○ 服务未运行", WS_CHILD|WS_VISIBLE, LX, y, PW+16, LH, hwnd, (HMENU)IDC_STATIC_HEARTBEAT, nullptr, nullptr);
+        g_hHeartbeat2 = CreateWindowW(L"STATIC", L"", WS_CHILD|WS_VISIBLE, LX, y+20, PW+16, LH, hwnd, (HMENU)IDC_STATIC_HEARTBEAT, nullptr, nullptr);
+        // 第二行加 tooltip:即使文字被裁断,鼠标悬停也能看到完整文本
+        g_hTooltip = CreateWindowW(TOOLTIPS_CLASSW, nullptr, WS_POPUP|TTS_ALWAYSTIP,
+            CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, hwnd, nullptr, GetModuleHandleW(nullptr), nullptr);
+        {
+            TOOLINFOW ti = {};
+            ti.cbSize = sizeof(ti);
+            ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+            ti.hwnd = hwnd;
+            ti.uId = (UINT_PTR)g_hHeartbeat2;
+            ti.lpszText = (LPWSTR)L"";
+            SendMessageW(g_hTooltip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+        }
         y += 48;
         // 按钮(相对左侧表单居中)
         y += 42;
@@ -637,8 +653,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     wchar_t modelName[256] = L"";
                     int sel = (int)SendMessageW(g_hComboModel, CB_GETCURSEL, 0, 0);
                     if (sel != CB_ERR) SendMessageW(g_hComboModel, CB_GETLBTEXT, sel, (LPARAM)modelName);
-                    SetWindowTextW(g_hHeartbeat2, (std::wstring(L"当前模型: ") + modelName).c_str());
+                    g_heartbeat2TipText = std::wstring(L"当前模型: ") + modelName;
+                    SetWindowTextW(g_hHeartbeat2, g_heartbeat2TipText.c_str());
+                    // 同步 tooltip 文本:被裁断时悬停查看完整内容
+                    if (g_hTooltip) {
+                        TOOLINFOW ti = {};
+                        ti.cbSize = sizeof(ti);
+                        ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+                        ti.hwnd = hwnd;
+                        ti.uId = (UINT_PTR)g_hHeartbeat2;
+                        ti.lpszText = (LPWSTR)g_heartbeat2TipText.c_str();
+                        SendMessageW(g_hTooltip, TTM_UPDATETIPTEXTW, 0, (LPARAM)&ti);
+                    }
                 } else {
+                    g_heartbeat2TipText.clear();
                     SetWindowTextW(g_hHeartbeat2, L"");
                 }
             }
@@ -660,6 +688,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow) {
+    // 单实例保护:防止重复双击启动出 2 个进程 → 2 个窗口 + 2 个托盘图标
+    // 互斥锁句柄必须保持打开到进程结束,否则下次启动会因为已存在的同名互斥锁而失败
+    g_hSingleMutex = CreateMutexW(nullptr, TRUE, L"Local\\LlamaLauncher_SingleInstance");
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        HWND hOld = FindWindowW(L"LlamaLauncherMain", nullptr);
+        if (hOld) { ShowWindow(hOld, SW_SHOW); SetForegroundWindow(hOld); }
+        return 0;
+    }
+    // 通用控件初始化:tooltip(ICC_WIN95_CLASSES)需要
+    INITCOMMONCONTROLSEX icc = {sizeof(icc), ICC_WIN95_CLASSES};
+    InitCommonControlsEx(&icc);
+
     const wchar_t CLASS[] = L"LlamaLauncherMain";
     WNDCLASSEXW wc = {};
     wc.cbSize = sizeof(wc);
