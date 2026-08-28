@@ -7,13 +7,13 @@
 ## 功能
 
 - 🖥️ **硬件自动识别**:启动时检测 GPU(NVIDIA/AMD/Intel)、显存、内存、CPU 核心数,自动匹配最佳档位(32G+/24G/16G/12G/8G/6G/CPU),两行显示(CPU+内存 / 显卡)
-- 🎛️ **配置可选**:模型(递归扫描 `models` 目录,下拉展开显示全名,自动过滤 mmproj)、监听 IP、端口、后端(CUDA/Vulkan/CPU)、上下文、思考模式、Flash Attention、KV 量化、温度、生成上限
+- 🎛️ **配置可选**:模型(递归扫描 `models` 目录,下拉展开显示全名,自动过滤 mmproj)、监听 IP、端口、模式(CUDA/Vulkan/CPU)、上下文(4K~256K)、思考模式、Flash Attention、KV 量化(无 / Q4 / Q8 / Q8-Q4 混合,默认 Q8)、采样度、生成上限
 - 📡 **局域网访问**:IP 默认 `0.0.0.0`,局域网内设备可直接访问
 - 🩺 **心跳状态**:按钮上方实时显示服务状态(绿=运行中 / 灰=未运行),轮询 `/health`
 - 💾 **配置记忆**:上次选择自动保存(`launcher.ini`)
 - 🔄 **router 模式**:多模型热切换(基于 llama.cpp `--models-dir`)
 - ⚡ **启动自动加载**:勾选后自动写 `presets.ini` 的 `load-on-startup` 并传 `--models-preset`,网页打开即有模型(子目录模型取子目录名、根目录散文件取文件名去 `.gguf` 作为模型 ID)
-- 🐞 **运行模式**:下拉选择「普通模式」(后台静默运行,点停止自动关闭)或「强制模式」(cmd /k 独立控制台窗口,完整日志可滚动观察;llama-server 出错/意外退出时窗口保留,方便排查)
+- 🐞 **诊断模式**:勾选后以 cmd /k 独立控制台窗口运行,完整日志可滚动观察;llama-server 出错/意外退出时窗口保留,方便排查;不勾选为后台静默运行(点停止自动关闭)
 - 🎨 **自定义图标**:内置 8-bit 像素风图标(奔跑的马)
 
 ## 使用
@@ -52,3 +52,9 @@ x86_64-w64-mingw32-g++ src/main.cpp -o "Llama Launcher.exe" -mwindows -municode 
 ## 许可证
 
 [MIT](LICENSE) © 2026 aceneil
+
+## 打赏
+
+如果项目对您有帮助请打赏我,作者目前只有5060ti-16g未能完整测试app可靠性,如给您带来不便请见谅。
+
+![微信打赏码](assets/wechat-reward.png)

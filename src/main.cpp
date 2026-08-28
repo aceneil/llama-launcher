@@ -21,8 +21,8 @@
 // ---------------- 控件 ID ----------------
 enum { IDC_COMBO_MODEL=101, IDC_EDIT_IP, IDC_EDIT_PORT,
        IDC_COMBO_BACKEND, IDC_COMBO_CTX, IDC_COMBO_THINK,
-       IDC_CHK_FA, IDC_CHK_KV, IDC_CHK_AUTOBROWSER,
-       IDC_CHK_PRELOAD, IDC_COMBO_MODE,
+       IDC_CHK_FA, IDC_COMBO_KV, IDC_CHK_AUTOBROWSER,
+       IDC_CHK_PRELOAD, IDC_CHK_MODE,
        IDC_EDIT_TEMP, IDC_EDIT_MAXTOK, IDC_BTN_START, IDC_BTN_STOP,
        IDC_EDIT_LOG, IDC_STATIC_STATUS, IDC_BTN_REDETECT, IDC_STATIC_HEARTBEAT };
 #define IDI_ICON1 101
@@ -33,8 +33,8 @@ enum { IDC_COMBO_MODEL=101, IDC_EDIT_IP, IDC_EDIT_PORT,
 // ---------------- 全局 ----------------
 static NOTIFYICONDATAW g_nid = {};
 static HWND g_hwnd, g_hComboModel, g_hEditIP, g_hEditPort, g_hComboBackend,
-            g_hComboCtx, g_hComboThink, g_hChkFA, g_hChkKV, g_hChkAutoBrowser,
-            g_hChkPreload, g_hComboMode,
+            g_hComboCtx, g_hComboThink, g_hChkFA, g_hComboKV, g_hChkAutoBrowser,
+            g_hChkPreload, g_hChkMode,
             g_hEditTemp, g_hEditMaxTok, g_hBtnStart, g_hBtnStop, g_hBtnRedetect, g_hStatus, g_hStatus2, g_hHeartbeat, g_hHeartbeat2;
 static std::wstring g_webUrl = L"http://localhost:8080";
 static PROCESS_INFORMATION g_pi = {};
@@ -284,11 +284,18 @@ static void startServer() {
     wchar_t ip[64], port[16], temp[16], mtok[16];
     GetWindowTextW(g_hEditIP, ip, 64); GetWindowTextW(g_hEditPort, port, 16);
     GetWindowTextW(g_hEditTemp, temp, 16); GetWindowTextW(g_hEditMaxTok, mtok, 16);
+    // 采样度校验:0~2(可含小数),非法输入时拒绝启动
+    wchar_t* tempEnd = nullptr;
+    double tempVal = wcstod(temp, &tempEnd);
+    if (tempEnd == temp || *tempEnd != L'\0' || tempVal < 0.0 || tempVal > 2.0) {
+        MessageBoxW(g_hwnd, L"采样度必须是 0 到 2 之间的数字(如 0.7、1.5、2)。", L"Llama Launcher", MB_ICONERROR);
+        return;
+    }
     int ctxIdx = SendMessageW(g_hComboCtx, CB_GETCURSEL, 0, 0);
     wchar_t ctxBuf[16]; SendMessageW(g_hComboCtx, CB_GETLBTEXT, ctxIdx, (LPARAM)ctxBuf);
     std::wstring ctxStr = ctxBuf;
     bool fa = SendMessageW(g_hChkFA, BM_GETCHECK, 0, 0) == BST_CHECKED;
-    bool kv = SendMessageW(g_hChkKV, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    int kvIdx = SendMessageW(g_hComboKV, CB_GETCURSEL, 0, 0);
 
     g_help = runCmd(L"\"" + server + L"\" --help");
 
@@ -309,9 +316,12 @@ static void startServer() {
     // 上下文:下拉是 4K/8K/16K/32K,转成纯数字传(避免 K 后缀解析差异)
     {
         std::wstring ctxNum = L"4096";
-        if      (ctxStr == L"8K")  ctxNum = L"8192";
-        else if (ctxStr == L"16K") ctxNum = L"16384";
-        else if (ctxStr == L"32K") ctxNum = L"32768";
+        if      (ctxStr == L"8K")   ctxNum = L"8192";
+        else if (ctxStr == L"16K")  ctxNum = L"16384";
+        else if (ctxStr == L"32K")  ctxNum = L"32768";
+        else if (ctxStr == L"64K")  ctxNum = L"65536";
+        else if (ctxStr == L"128K") ctxNum = L"131072";
+        else if (ctxStr == L"256K") ctxNum = L"262144";
         args += L" -c " + ctxNum;
     }
 
@@ -335,7 +345,14 @@ static void startServer() {
     }
     if (hasFlag(L"--jinja")) args += L" --jinja";
     if (fa && hasFlag(L"--flash-attn")) args += L" -fa on";
-    if (kv && hasFlag(L"--cache-type-k")) args += L" --cache-type-k q8_0 --cache-type-v q8_0";
+    // KV 量化:无=整段不传(llama-server 用默认 cache type);Q4/Q8/Q8-Q4 按选择拼接
+    if (kvIdx > 0 && kvIdx < 4 && hasFlag(L"--cache-type-k")) {
+        const wchar_t* kvModes[] = {
+            L" --cache-type-k q4_0 --cache-type-v q4_0",
+            L" --cache-type-k q8_0 --cache-type-v q8_0",
+            L" --cache-type-k q8_0 --cache-type-v q4_0" };
+        args += kvModes[kvIdx - 1];
+    }
     int thinkIdx = SendMessageW(g_hComboThink, CB_GETCURSEL, 0, 0);
     if (thinkIdx == 0) {
         if (hasFlag(L"--reasoning-budget")) args += L" --reasoning-budget 0";
@@ -352,10 +369,9 @@ static void startServer() {
     if (hasFlag(L"--fit-target")) args += L" --fit-target 1024";
     else if (g_help.find(L"cuda") != std::wstring::npos) args += L" -ngl 99";
 
-    // 运行模式:普通=后台静默(点停止自动关闭);强制=cmd /k 独立窗口,
-    // llama-server 崩溃/退出后窗口保留,方便看错误日志。
-    int modeIdx = SendMessageW(g_hComboMode, CB_GETCURSEL, 0, 0);
-    g_forceConsole = (modeIdx == 1);
+    // 诊断模式:勾选=cmd /k 独立窗口,llama-server 崩溃/退出后窗口保留,
+    // 方便看错误日志;不勾选=普通后台静默(点停止自动关闭)。
+    g_forceConsole = (SendMessageW(g_hChkMode, BM_GETCHECK, 0, 0) == BST_CHECKED);
     std::vector<wchar_t> cmdline;
     if (g_forceConsole) {
         // cmd /k 双层引号:cmd 会剥掉最外层引号,执行里面的完整命令
@@ -413,10 +429,10 @@ static void saveConfig() {
     WritePrivateProfileStringW(L"launcher", L"ctx", std::to_wstring(c).c_str(), iniPath().c_str());
     WritePrivateProfileStringW(L"launcher", L"think", std::to_wstring(t).c_str(), iniPath().c_str());
     WritePrivateProfileStringW(L"launcher", L"fa", SendMessageW(g_hChkFA,BM_GETCHECK,0,0)==BST_CHECKED?L"1":L"0", iniPath().c_str());
-    WritePrivateProfileStringW(L"launcher", L"kv", SendMessageW(g_hChkKV,BM_GETCHECK,0,0)==BST_CHECKED?L"1":L"0", iniPath().c_str());
+    WritePrivateProfileStringW(L"launcher", L"kv", std::to_wstring(SendMessageW(g_hComboKV, CB_GETCURSEL, 0, 0)).c_str(), iniPath().c_str());
     WritePrivateProfileStringW(L"launcher", L"autobrowser", SendMessageW(g_hChkAutoBrowser,BM_GETCHECK,0,0)==BST_CHECKED?L"1":L"0", iniPath().c_str());
     WritePrivateProfileStringW(L"launcher", L"preload", SendMessageW(g_hChkPreload,BM_GETCHECK,0,0)==BST_CHECKED?L"1":L"0", iniPath().c_str());
-    WritePrivateProfileStringW(L"launcher", L"mode", std::to_wstring(SendMessageW(g_hComboMode, CB_GETCURSEL, 0, 0)).c_str(), iniPath().c_str());
+    WritePrivateProfileStringW(L"launcher", L"mode", SendMessageW(g_hChkMode,BM_GETCHECK,0,0)==BST_CHECKED?L"1":L"0", iniPath().c_str());
     WritePrivateProfileStringW(L"launcher", L"temp", temp, iniPath().c_str());
     WritePrivateProfileStringW(L"launcher", L"maxtok", mtok, iniPath().c_str());
 }
@@ -436,12 +452,12 @@ static void loadConfig() {
     SendMessageW(g_hComboCtx, CB_SETCURSEL, c, 0);
     SendMessageW(g_hComboThink, CB_SETCURSEL, t, 0);
     SendMessageW(g_hChkFA, BM_SETCHECK, GetPrivateProfileIntW(L"launcher", L"fa", 1, iniPath().c_str()) ? BST_CHECKED : BST_UNCHECKED, 0);
-    SendMessageW(g_hChkKV, BM_SETCHECK, GetPrivateProfileIntW(L"launcher", L"kv", 1, iniPath().c_str()) ? BST_CHECKED : BST_UNCHECKED, 0);
+    int kvIdx = GetPrivateProfileIntW(L"launcher", L"kv", 2, iniPath().c_str());
+    if (kvIdx < 0 || kvIdx > 3) kvIdx = 2;   // 默认 Q8(索引 2)
+    SendMessageW(g_hComboKV, CB_SETCURSEL, kvIdx, 0);
     SendMessageW(g_hChkAutoBrowser, BM_SETCHECK, GetPrivateProfileIntW(L"launcher", L"autobrowser", 0, iniPath().c_str()) ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(g_hChkPreload, BM_SETCHECK, GetPrivateProfileIntW(L"launcher", L"preload", 1, iniPath().c_str()) ? BST_CHECKED : BST_UNCHECKED, 0);
-    int mode = GetPrivateProfileIntW(L"launcher", L"mode", 0, iniPath().c_str());
-    if (mode < 0 || mode > 1) mode = 0;
-    SendMessageW(g_hComboMode, CB_SETCURSEL, mode, 0);
+    SendMessageW(g_hChkMode, BM_SETCHECK, GetPrivateProfileIntW(L"launcher", L"mode", 0, iniPath().c_str()) ? BST_CHECKED : BST_UNCHECKED, 0);
 }
 
 // ---------------- 窗口 ----------------
@@ -456,9 +472,9 @@ static void applyDetected() {
     int backendSel = 0;
     if (h.vendor == L"cuda") backendSel = 2; else if (h.vendor == L"vulkan") backendSel = 3;
     SendMessageW(g_hComboBackend, CB_SETCURSEL, backendSel, 0);
-    const wchar_t* ctxItems[] = {L"4096", L"8192", L"16384", L"32768"};
+    const wchar_t* ctxItems[] = {L"4096", L"8192", L"16384", L"32768", L"65536", L"131072", L"262144"};
     int ctxSel = 0;
-    for (int i = 0; i < 4; i++) if (ctx == ctxItems[i]) { ctxSel = i; break; }
+    for (int i = 0; i < 7; i++) if (ctx == ctxItems[i]) { ctxSel = i; break; }
     SendMessageW(g_hComboCtx, CB_SETCURSEL, ctxSel, 0);
     std::wstring cpuLine = L"CPU " + std::to_wstring(h.cores) + L" 核 · 内存 " + std::to_wstring((int)h.ramGB) + L"G";
     std::wstring gpuLine = (h.vendor == L"cpu")
@@ -500,33 +516,33 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         addLabel(hwnd, L"端口:", IX+120, y+2, 44, LH);
         g_hEditPort = CreateWindowW(L"EDIT", L"8080", WS_CHILD|WS_VISIBLE|WS_BORDER|ES_AUTOHSCROLL, IX+164, y, 60, LH+4, hwnd, (HMENU)IDC_EDIT_PORT, nullptr, nullptr);
         y += 30;
-        // 后端 / 上下文 / 思考
-        addLabel(hwnd, L"后端:", LX, y+2, LW0, LH);
+        // 模式 / 上下文 / 思考
+        addLabel(hwnd, L"模式:", LX, y+2, LW0, LH);
         g_hComboBackend = CreateWindowW(L"COMBOBOX", L"", WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST|WS_VSCROLL, IX, y, 70, 200, hwnd, (HMENU)IDC_COMBO_BACKEND, nullptr, nullptr);
         for (auto* s : {L"自动检测", L"强制 CPU", L"CUDA", L"Vulkan"}) SendMessageW(g_hComboBackend, CB_ADDSTRING, 0, (LPARAM)s);
         addLabel(hwnd, L"上下文:", IX+84, y+2, 52, LH);
         g_hComboCtx = CreateWindowW(L"COMBOBOX", L"", WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST|WS_VSCROLL, IX+136, y, 56, 200, hwnd, (HMENU)IDC_COMBO_CTX, nullptr, nullptr);
-        for (auto* s : {L"4K", L"8K", L"16K", L"32K"}) SendMessageW(g_hComboCtx, CB_ADDSTRING, 0, (LPARAM)s);
+        for (auto* s : {L"4K", L"8K", L"16K", L"32K", L"64K", L"128K", L"256K"}) SendMessageW(g_hComboCtx, CB_ADDSTRING, 0, (LPARAM)s);
         addLabel(hwnd, L"思考:", IX+204, y+2, 36, LH);
         g_hComboThink = CreateWindowW(L"COMBOBOX", L"", WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST|WS_VSCROLL, IX+240, y, 46, 200, hwnd, (HMENU)IDC_COMBO_THINK, nullptr, nullptr);
         for (auto* s : {L"off", L"on", L"auto"}) SendMessageW(g_hComboThink, CB_ADDSTRING, 0, (LPARAM)s);
         y += 30;
-        // 温度 / 生成上限(输入框,在勾选框上方)
-        addLabel(hwnd, L"温度:", LX, y+2, LW0, LH);
+        // 采样度 / 生成上限(输入框,在勾选框上方)
+        addLabel(hwnd, L"采样度:", LX, y+2, LW0, LH);
         g_hEditTemp = CreateWindowW(L"EDIT", L"0.7", WS_CHILD|WS_VISIBLE|WS_BORDER, IX, y, 60, LH+4, hwnd, (HMENU)IDC_EDIT_TEMP, nullptr, nullptr);
         addLabel(hwnd, L"生成上限:", IX+70, y+2, 64, LH);
         g_hEditMaxTok = CreateWindowW(L"EDIT", L"8192", WS_CHILD|WS_VISIBLE|WS_BORDER, IX+134, y, 60, LH+4, hwnd, (HMENU)IDC_EDIT_MAXTOK, nullptr, nullptr);
         y += 34;
         // 勾选行 1:性能选项
         g_hChkFA = CreateWindowW(L"BUTTON", L"Flash Attention", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX, y, 118, LH, hwnd, (HMENU)IDC_CHK_FA, nullptr, nullptr);
-        g_hChkKV = CreateWindowW(L"BUTTON", L"KV 量化", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX+126, y, 76, LH, hwnd, (HMENU)IDC_CHK_KV, nullptr, nullptr);
-        g_hChkAutoBrowser = CreateWindowW(L"BUTTON", L"自动开浏览器", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX+210, y, 120, LH, hwnd, (HMENU)IDC_CHK_AUTOBROWSER, nullptr, nullptr);
+        addLabel(hwnd, L"KV:", LX+126, y+2, 28, LH);
+        g_hComboKV = CreateWindowW(L"COMBOBOX", L"", WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST|WS_VSCROLL, LX+156, y, 96, 200, hwnd, (HMENU)IDC_COMBO_KV, nullptr, nullptr);
+        for (auto* s : {L"无", L"Q4", L"Q8", L"Q8-Q4 混合"}) SendMessageW(g_hComboKV, CB_ADDSTRING, 0, (LPARAM)s);
+        g_hChkAutoBrowser = CreateWindowW(L"BUTTON", L"自动开浏览器", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX+258, y, 100, LH, hwnd, (HMENU)IDC_CHK_AUTOBROWSER, nullptr, nullptr);
         y += 28;
-        // 勾选行 2:预载 / 运行模式
+        // 勾选行 2:预载 / 诊断模式(勾选 = cmd /k 独立窗口)
         g_hChkPreload = CreateWindowW(L"BUTTON", L"启动自动加载所选模型", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX, y, 176, LH, hwnd, (HMENU)IDC_CHK_PRELOAD, nullptr, nullptr);
-        addLabel(hwnd, L"运行模式:", LX+182, y+4, 60, LH);   // y+4:与 checkbox 文字垂直居中对齐
-        g_hComboMode = CreateWindowW(L"COMBOBOX", L"", WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST|WS_VSCROLL, LX+242, y, 100, 200, hwnd, (HMENU)IDC_COMBO_MODE, nullptr, nullptr);
-        for (auto* s : {L"普通模式", L"强制模式"}) SendMessageW(g_hComboMode, CB_ADDSTRING, 0, (LPARAM)s);
+        g_hChkMode = CreateWindowW(L"BUTTON", L"诊断模式", WS_CHILD|WS_VISIBLE|BS_AUTOCHECKBOX, LX+182, y, 100, LH, hwnd, (HMENU)IDC_CHK_MODE, nullptr, nullptr);
         y += 28;
         // 心跳状态行(按钮上方):第一行状态,第二行当前模型
         g_hHeartbeat = CreateWindowW(L"STATIC", L"○ 服务未运行", WS_CHILD|WS_VISIBLE, LX, y, PW, LH, hwnd, (HMENU)IDC_STATIC_HEARTBEAT, nullptr, nullptr);
