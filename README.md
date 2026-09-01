@@ -66,6 +66,17 @@ Configurations are managed dynamically or via a local configuration file (e.g., 
 - **Coding Preset**: High context window (`-c 16384`), low temperature (`0.2`).
 - **Creative Writing Preset**: Moderate context window (`-c 4096`), higher temperature (`0.7`).
 
+## 赞助与支持
+
+如果项目对您有帮助请打赏我,作者目前只有5060ti-16g未能完整测试app可靠性,如给您带来不便请见谅。
+
+<div align="center">
+  <img src="assets/wechat-reward.png" width="255" alt="微信打赏码">
+  <p>微信打赏码</p>
+</div>
+
+---
+
 ## 📄 License
 
 This project is licensed under the [MIT License](https://www.google.com/search?q=LICENSE).
