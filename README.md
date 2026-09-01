@@ -66,7 +66,7 @@ Configurations are managed dynamically or via a local configuration file (e.g., 
 - **Coding Preset**: High context window (`-c 16384`), low temperature (`0.2`).
 - **Creative Writing Preset**: Moderate context window (`-c 4096`), higher temperature (`0.7`).
 
-## ₿ Sponsorship & Support
+## 🪙 Sponsorship & Support
 
 If this project has been helpful to you, please consider donating. The author currently only has a 5060 Ti 16G and hasn't been able to fully test the app's reliability — apologies for any inconvenience.
 
