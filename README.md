@@ -66,13 +66,13 @@ Configurations are managed dynamically or via a local configuration file (e.g., 
 - **Coding Preset**: High context window (`-c 16384`), low temperature (`0.2`).
 - **Creative Writing Preset**: Moderate context window (`-c 4096`), higher temperature (`0.7`).
 
-## 赞助与支持
+## Sponsorship & Support
 
-如果项目对您有帮助请打赏我,作者目前只有5060ti-16g未能完整测试app可靠性,如给您带来不便请见谅。
+If this project has been helpful to you, please consider donating. The author currently only has a 5060 Ti 16G and hasn't been able to fully test the app's reliability — apologies for any inconvenience.
 
 <div align="center">
-  <img src="assets/wechat-reward.png" width="255" alt="微信打赏码">
-  <p>微信打赏码</p>
+  <img src="assets/wechat-reward.png" width="255" alt="WeChat reward QR code">
+  <p>WeChat reward QR code</p>
 </div>
 
 ---
