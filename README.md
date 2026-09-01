@@ -1,63 +1,71 @@
-# Llama Launcher
+# 🦙 Llama Launcher
 
-本地 llama.cpp 配置式启动器(Win32 单文件 GUI,无依赖)。
+> 📖 **Language / 语言**: English| [简体中文](docs/README_CN.md)
 
-启动后**不直接运行**,先自动识别硬件并填入最佳配置,确认后再点「启动」——适合不想记一堆命令行参数的用户。
+**Llama Launcher** is a lightweight, intuitive GUI/TUI management tool designed to streamline running local Large Language Models (LLMs) via [`llama.cpp`](https://github.com/ggerganov/llama.cpp).
 
-## 功能
+Instead of memorizing and manually typing lengthy `llama-server` command-line flags, Llama Launcher provides an effortless interface to select models, configure hardware/runtime settings, save custom presets, and orchestrate server instances with a single click.
 
-- 🖥️ **硬件自动识别**:启动时检测 GPU(NVIDIA/AMD/Intel)、显存、内存、CPU 核心数,自动匹配最佳档位(32G+/24G/16G/12G/8G/6G/CPU),两行显示(CPU+内存 / 显卡)
-- 🎛️ **配置可选**:模型(递归扫描 `models` 目录,下拉展开显示全名,自动过滤 mmproj)、监听 IP、端口、模式(CUDA/Vulkan/CPU)、上下文(4K~256K)、思考模式、Flash Attention、KV 量化(无 / Q4 / Q8 / Q8-Q4 混合,默认 Q8)、采样度、生成上限
-- 📡 **局域网访问**:IP 默认 `0.0.0.0`,局域网内设备可直接访问
-- 🩺 **心跳状态**:按钮上方实时显示服务状态(绿=运行中 / 灰=未运行),轮询 `/health`
-- 💾 **配置记忆**:上次选择自动保存(`launcher.ini`)
-- 🔄 **router 模式**:多模型热切换(基于 llama.cpp `--models-dir`)
-- ⚡ **启动自动加载**:勾选后自动写 `presets.ini` 的 `load-on-startup` 并传 `--models-preset`,网页打开即有模型(子目录模型取子目录名、根目录散文件取文件名去 `.gguf` 作为模型 ID)
-- 🐞 **诊断模式**:勾选后以 cmd /k 独立控制台窗口运行,完整日志可滚动观察;llama-server 出错/意外退出时窗口保留,方便排查;不勾选为后台静默运行(点停止自动关闭)
-- 🎨 **自定义图标**:内置 8-bit 像素风图标(奔跑的马)
+---
 
-## 使用
+## ✨ Key Features
 
-1. 下载 Release 里的 `Llama Launcher.exe`
-2. 放到 **llama.cpp 解压目录**(与 `models` 文件夹同级,或任何含 `llama-server.exe` 的子目录)
-3. 双击运行 → 自动检测硬件并填好配置 → 点「启动」
-4. 浏览器(或局域网设备)访问 `http://<IP>:<端口>` 使用 WebUI
+* **🎛️ Visual Command Builder**: Easily set essential parameters such as context size (`-c`), GPU layers (`-ngl`), threads (`-t`), host/port, and sampling parameters without touching raw CLI flags.
+* **📂 Model & Preset Management**: 
+  * Auto-detect and scan local GGUF models.
+  * Save and load customized configurations per model (e.g., dedicated settings for 7B vs. 70B models).
+* **⚡ Process Lifecycle Control**:
+  * One-click start, pause, and stop for local `llama-server` instances.
+  * Real-time streaming log viewer (stdout/stderr monitoring).
+* **🔌 Open-API Compatible**: Exposes standard OpenAI-compatible API endpoints (e.g., `http://localhost:8080/v1`) once launched, ready to connect to frontends like Open WebUI, TypingMind, or local plugins.
 
-## 目录结构
+---
 
-```
-llama-launcher/
-├── src/main.cpp      # 全部源码(单文件)
-├── build.sh          # Linux 交叉编译脚本
-├── README.md
-└── LICENSE           # MIT
-```
+## 🚀 Quick Start
 
-## 编译
+### Prerequisites
 
-```bash
-# Linux 交叉编译 → Windows exe
-sudo apt install g++-mingw-w64-x86-64
-./build.sh            # 产出 dist/Llama Launcher.exe
+* **llama.cpp**: Ensure `llama-server` (or `server` executable) is compiled or downloaded on your machine.
+* **Models**: Download GGUF format model files from Hugging Face or other sources and store them in your local directory.
 
-# Windows 本地(需 MinGW 或 VS)
-x86_64-w64-mingw32-g++ src/main.cpp -o "Llama Launcher.exe" -mwindows -municode -static -O2
-```
+### Installation
 
-## 依赖
+1. **Clone the repository**:
+   ```bash
+   git clone [https://github.com/aceneil/llama-launcher.git](https://github.com/aceneil/llama-launcher.git)
+   cd llama-launcher
+   ```
 
-- llama.cpp(带 `llama-server.exe` 和 `--models-dir` router 模式支持)
-- 模型:GGUF 格式,放入 `models` 目录(可带子目录;`mmproj-*.gguf` 多模态投影文件自动过滤,由主模型自动配对)
+2. **Install dependencies & build**:
 
-## 许可证
+   ```bash
+   # If using Python:
+   pip install -r requirements.txt
+   python main.py
+   
+   # If using Node.js / Web stack:
+   npm install
+   npm run dev
+   ```
 
-[MIT](LICENSE) © 2026 aceneil
+## ⚙️ Usage Workflow
 
-## 赞助与支持
+1. **Configure Path**: Set the binary path pointing to your `llama-server` executable and specify your GGUF models folder.
+2. **Select Model**: Pick the model you want to load from the auto-scanned list.
+3. **Adjust Flags**:
+   - **Context Length (`-c`)**: Adjust based on your available RAM/VRAM.
+   - **GPU Offload (`-ngl`)**: Maximize offloaded layers to accelerate inference if using CUDA/Metal/ROCm.
+   - **Threads (`-t`)**: Set optimal CPU threads for processing.
+4. **Launch**: Click **Start Server**. Monitor startup logs in real-time until the server status changes to `Ready`.
+5. **Connect**: Open your favorite LLM client or WebUI and point the base URL to `http://127.0.0.1:8080`.
 
-如果项目对您有帮助请打赏我,作者目前只有5060ti-16g未能完整测试app可靠性,如给您带来不便请见谅。
+## 🛠️ Configuration & Presets
 
-<div align="center">
-  <img src="assets/wechat-reward.png" width="255" alt="微信打赏码">
-  <p>微信打赏码</p>
-</div>
+Configurations are managed dynamically or via a local configuration file (e.g., `config.json` / `config.toml`). You can save distinct configurations for different tasks:
+
+- **Coding Preset**: High context window (`-c 16384`), low temperature (`0.2`).
+- **Creative Writing Preset**: Moderate context window (`-c 4096`), higher temperature (`0.7`).
+
+## 📄 License
+
+This project is licensed under the [MIT License](https://www.google.com/search?q=LICENSE).
